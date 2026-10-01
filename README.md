@@ -113,151 +113,63 @@ Things that are already taken care of, and why:
 - Keep `.env` with LF line endings (copying `.env.example` does): `make` reads
   it directly, and a CRLF `.env` leaves a stray `\r` on every value.
 
-## Deploy to AWS
+## Deploy to AWS (ECS Fargate + S3 / CloudFront)
 
-`infra/` holds four CloudFormation templates: `auth.yml` (Cognito sign-in),
-`ecr.yml` (image registry), `backend.yml` (API and database) and `frontend.yml`
-(site). `make` reads `.env`,
-so the `aws-*` targets pick up the credentials and settings from there; `.env` is
-gitignored, so real keys never reach the repository. The AWS CLI runs in the
-`amazon/aws-cli` container, so nothing has to be installed on the host besides
-Docker (`AWS=aws make aws-deploy` uses a local CLI instead, which is noticeably
-faster).
+The project includes declarative CloudFormation templates in `infra/` and contract Makefile/make.cmd commands for managing the AWS infrastructure within **AWS Free Tier**:
+
+- **Backend:** ECS Fargate service running behind an Application Load Balancer (ALB)
+  - Tasks configured at **0.25 vCPU (256 CPU units) and 0.5 GB RAM (512 MB memory)**
+  - Single Target Group (port 8000) with health check at `/health`
+- **Frontend:** Static React/Vite SPA hosted in a private **S3 Standard** bucket behind **CloudFront** (HTTPS with Origin Access Control)
+- **Registries:** Amazon ECR repositories for backend and frontend images (`linux/amd64`) with 5-image lifecycle expiration to keep storage within 500 MB Free Tier
+- **Teardown & Cost Control:** A dedicated teardown command that cleanly destroys all resources (ALB, ECS, ECR, S3, CloudFront) to guarantee $0 balance leakage.
+
+### Architecture
 
 ```
-browser ──https──→ CloudFront (optional custom domain) → private S3 bucket (Next.js static export)
-   └────https──→ Lambda function URL → Lambda → Aurora Serverless v2 :5432
+User Browser
+  ├──HTTPS──→ CloudFront ──→ Private S3 Bucket (React SPA static assets)
+  └──HTTP───→ Application Load Balancer (ALB :80) ──→ ECS Fargate Task (:8000)
 ```
 
-Every resource lives in `AWS_REGION`, **us-east-1** by default, which is also
-where CloudFront reads its certificates from. There is no API Gateway or load
-balancer: the browser calls the API on its function URL, and FastAPI's CORS
-settings allow it.
+### AWS CLI Setup & Credentials
 
-Every stack is tagged `PROJECT_NAME=<value of PROJECT_NAME>`, and every resource
-that accepts tags also carries it explicitly in the templates. Filter by it in
-Cost Explorer or Resource Groups to see everything the project owns.
-
-### One command
+Before deploying, ensure AWS credentials are configured. Fill them in `.env`:
 
 ```bash
-make aws-whoami   # check the credentials work
-make aws-deploy   # sign-in, then the backend, then the frontend built against both
-```
-
-`aws-deploy` runs `aws-deploy-auth` and then the two steps below in order: the
-backend checks tokens from the user pool, and the frontend bakes the API URL and
-the pool's ids into its build. Each step can also run on its own.
-
-The backend Lambda sits in a VPC with no internet access, so it cannot download
-the pool's signing keys itself; `aws-deploy-backend` fetches them
-(`<issuer>/.well-known/jwks.json`) and passes them in as `COGNITO_JWKS`.
-`aws-deploy-frontend` re-deploys the auth stack once the CloudFront URL exists,
-so Cognito may redirect back to the site after Google sign-in.
-
-Fill these in `.env` first:
-
-```bash
-AWS_ACCESS_KEY_ID=...        # an IAM user, not root access keys
+AWS_ACCESS_KEY_ID=AKIA...
 AWS_SECRET_ACCESS_KEY=...
+# Optional: only for temporary credentials (e.g. AWS Academy or SSO)
+# AWS_SESSION_TOKEN=...
 AWS_REGION=us-east-1
-PROJECT_NAME=successfulsuccess   # prefixes every resource name, and the PROJECT_NAME tag
-AWS_DB_PASSWORD=...          # 8-41 chars, [A-Za-z0-9_-] only
-AWS_CORS_ORIGINS=            # empty: follow the frontend's URLs (* until it exists)
-GOOGLE_CLIENT_ID=            # optional: Google sign-in (see "Sign-in" above)
-GOOGLE_CLIENT_SECRET=
-AWS_FRONTEND_DOMAIN=         # optional, e.g. app.example.com
+PROJECT_NAME=successfulsuccess
 ```
 
-### 1. Backend — Lambda function URL, Aurora Serverless v2
-
+You can verify credentials anytime:
 ```bash
-make aws-deploy-backend   # ECR + build & push + create/update the stack + migrate, prints the URL
+make aws-whoami
+# or on Windows:
+.\make.cmd aws-whoami
 ```
 
-The API runs as a **Lambda function** from a container image
-(`backend/Dockerfile.lambda`): the same FastAPI app, adapted to Lambda by
-[Mangum](https://github.com/Kludex/mangum) in `app/lambda_handler.py`. Requests
-reach it through its **function URL** (`https://<id>.lambda-url.<region>.on.aws`),
-Lambda's own public HTTPS endpoint, and that URL is the backend URL the frontend
-is built with. FastAPI keeps doing the routing, CORS and error envelope exactly
-as it does locally. `backend/Dockerfile` stays the local/compose image.
+### Contract Commands
 
-The database is an **Aurora Serverless v2** PostgreSQL cluster with one
-`db.serverless` writer at the smallest size Aurora allows: it scales between
-0 and 1 ACU (`DbMinCapacity`, `DbMaxCapacity`) and **pauses after 5 idle
-minutes** (also the minimum), so an unused deployment
-pays only for storage. The first connection after a pause waits ~15 s while it
-resumes; the function's 60 s timeout covers that.
+| Command | Alias | Description |
+|---------|-------|-------------|
+| `make aws-init` | `make infra-up` | **Create base infrastructure:** ECR repositories (backend & frontend), S3 Standard bucket & CloudFront distribution, ECS Cluster, IAM roles (Task Execution & Task Role), Security Groups, and ALB + single Target Group. |
+| `make build-push` | — | **Build & push Docker images:** Builds images for AWS architecture (`x86_64` / `linux/amd64`), logs into ECR, tags images as `:latest`, and pushes to AWS ECR. |
+| `make deploy` | — | **Deploy services & static files:** Deploys/updates the ECS Fargate service (0.25 vCPU / 0.5 GB RAM) and builds the frontend static export pointing to the ALB API URL, uploads to S3, and invalidates the CloudFront cache (`/*`). |
+| `make teardown` | `make infra-down` | **Cost Control & Full Cleanup:** Completely destroys and removes all created AWS resources (ALB, ECS Service, ECS Cluster, ECR repositories, S3 bucket, CloudFront distribution, CloudWatch log groups) to avoid any unexpected charges. |
+| `make aws-status` | — | Display stack status and deployment outputs. |
+| `make aws-logs` | — | Tail CloudWatch logs from the backend ECS container. |
+| `make aws-url` | — | Print deployed CloudFront and ALB URLs. |
 
-The function sits in the account's **default VPC**, next to the cluster, so the
-database is never public: its security group only accepts the function's. The
-function needs nothing else on the network, so there is no NAT gateway.
+### Windows Support
 
-Migrations run in the same function: invoked directly with
-`{"action": "migrate"}` it applies them instead of serving a request. Function
-URL events never carry that key, so no web request can trigger it.
-`make aws-deploy-backend` invokes it after every deploy, so migrations run once
-per deploy rather than racing on each cold start.
-
-The first deploy takes ~15 minutes; Aurora is the slow part. It is idempotent —
-run it again to ship a new version. The image is passed to the stack by digest,
-not by tag, so every push really does update the function. If the stack is
-still busy with an earlier update, the target waits for it rather than failing.
-
-| Command | What it does |
-|---------|--------------|
-| `make aws-url` | Print the API URL (`/docs` for Swagger, `/health` for the check) |
-| `make aws-status` | Stack outputs plus the API function's state |
-| `make aws-logs` | Follow the function logs from CloudWatch |
-| `make aws-migrate` | Apply migrations again on their own |
-| `make aws-destroy` | Delete every stack (asks first — the database goes too) |
-
-The image is built for `AWS_LAMBDA_ARCH` (`x86_64` by default).
-`AWS_LAMBDA_ARCH=arm64 make aws-deploy-backend` is ~20% cheaper and builds
-natively on Apple Silicon. The image platform follows this variable, so the two
-cannot drift apart. The build passes `--provenance=false` because Lambda rejects
-the multi-manifest image index that BuildKit otherwise pushes.
-
-### 2. Frontend — S3 + CloudFront
-
-```bash
-make aws-deploy-frontend   # create/update the stack, build against the API URL, upload
-make aws-frontend-url      # print the site URL
-```
-
-The target refuses to run until the backend stack exists. It reads the
-backend's function URL from that stack, builds the Next.js **static export** in
-Docker with `NEXT_PUBLIC_API_BASE_URL` set to it, syncs the files to a
-**private S3 bucket** and invalidates the **CloudFront** distribution in front
-of it. The site is served over HTTPS at `https://<id>.cloudfront.net`. A new
-distribution takes ~5 minutes to come up.
-
-- The distribution is on CloudFront's **flat-rate Free plan**
-  (`AWS::PricingPlanManager::Subscription`): $0 a month for 1M requests and
-  100 GB, with no overage charges, WAF and DDoS protection included. The plan
-  requires a web ACL of its own, so the stack creates one that allows
-  everything. AWS allows 3 Free plans per account and refuses them while the
-  account is on the AWS Free Tier; set `AWS_CLOUDFRONT_PLAN=PAY_AS_YOU_GO` there.
-  `PricingPlanStatus` in the stack outputs reads `ACTIVE` once it applies.
-- The bucket blocks all public access. CloudFront reads it through **origin
-  access control**, and the bucket policy admits only this distribution.
-- The export is built with `trailingSlash`, so each route is a folder with an
-  `index.html` (`/meetings/new/`). A small CloudFront Function maps clean URLs
-  onto those files, since S3's REST endpoint has no index documents. Anything
-  missing gets the export's `404.html` with a 404 status.
-  `output` stays `standalone` for the compose/production image and switches to
-  `export` only when `NEXT_OUTPUT=export` is set, which is the deploy target's
-  job.
-- HTML is uploaded with `no-cache` and the hashed assets with a one-year
-  immutable header, and every deploy invalidates `/*`, so a new version shows up
-  on the next page load.
-- With `AWS_CORS_ORIGINS` empty, the backend allows exactly the frontend's
-  origins (the CloudFront URL and the custom domain). On the very first
-  `make aws-deploy` the frontend does not exist yet, so the API starts with `*`;
-  the frontend step says so, and the next `make aws-deploy-backend` locks it down.
-
-### 3. Custom domain for the frontend (optional)
+On Windows, all commands can be run via:
+- `make <command>` (if GNU make is installed)
+- `.\make.cmd <command>` (Command Prompt or PowerShell)
+- `.\infra.ps1 <command>` (PowerShell directly)
 
 ```bash
 # .env

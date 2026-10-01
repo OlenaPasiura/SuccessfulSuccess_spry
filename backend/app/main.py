@@ -19,3 +19,8 @@ app.add_middleware(
 )
 
 app.include_router(meetings_router)
+
+
+@app.get("/health", tags=["health"])
+def health_check() -> dict[str, str]:
+    return {"status": "ok"}

@@ -1,0 +1,168 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Base ECS Fargate cluster, IAM roles, ALB, single Target Group, and Security Groups.
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: successfulsuccess
+    Description: Prefix for resource names.
+
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: VPC ID (default VPC).
+
+  SubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: List of at least two public subnets for the Application Load Balancer.
+
+Resources:
+  ECSCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: !Sub "${ProjectName}-cluster"
+      Tags:
+        - Key: PROJECT_NAME
+          Value: !Ref ProjectName
+
+  ECSTaskExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ProjectName}-execution-role"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+      Tags:
+        - Key: PROJECT_NAME
+          Value: !Ref ProjectName
+
+  ECSTaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ProjectName}-task-role"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      Tags:
+        - Key: PROJECT_NAME
+          Value: !Ref ProjectName
+
+  AlbSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub "${ProjectName}-alb-sg"
+      GroupDescription: "Allow inbound HTTP to ALB"
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: PROJECT_NAME
+          Value: !Ref ProjectName
+
+  EcsSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub "${ProjectName}-ecs-sg"
+      GroupDescription: "Allow backend port 8000 traffic from ALB only"
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 8000
+          ToPort: 8000
+          SourceSecurityGroupId: !Ref AlbSecurityGroup
+      Tags:
+        - Key: PROJECT_NAME
+          Value: !Ref ProjectName
+
+  ApplicationLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: !Sub "${ProjectName}-alb"
+      Type: application
+      Scheme: internet-facing
+      SecurityGroups:
+        - !Ref AlbSecurityGroup
+      Subnets: !Ref SubnetIds
+      Tags:
+        - Key: PROJECT_NAME
+          Value: !Ref ProjectName
+
+  TargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub "${ProjectName}-tg"
+      TargetType: ip
+      Port: 8000
+      Protocol: HTTP
+      VpcId: !Ref VpcId
+      HealthCheckPath: /health
+      HealthCheckIntervalSeconds: 30
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+      TargetGroupAttributes:
+        - Key: deregistration_delay.timeout_seconds
+          Value: "15"
+      Tags:
+        - Key: PROJECT_NAME
+          Value: !Ref ProjectName
+
+  AlbListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref ApplicationLoadBalancer
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref TargetGroup
+
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/ecs/${ProjectName}-backend"
+      RetentionInDays: 1
+      Tags:
+        - Key: PROJECT_NAME
+          Value: !Ref ProjectName
+
+Outputs:
+  ClusterName:
+    Description: ECS Cluster Name
+    Value: !Ref ECSCluster
+  ClusterArn:
+    Description: ECS Cluster ARN
+    Value: !GetAtt ECSCluster.Arn
+  ExecutionRoleArn:
+    Description: IAM Task Execution Role ARN
+    Value: !GetAtt ECSTaskExecutionRole.Arn
+  TaskRoleArn:
+    Description: IAM Task Role ARN
+    Value: !GetAtt ECSTaskRole.Arn
+  AlbDnsName:
+    Description: Application Load Balancer DNS Name
+    Value: !GetAtt ApplicationLoadBalancer.DNSName
+  AlbUrl:
+    Description: Application Load Balancer HTTP URL
+    Value: !Sub "http://${ApplicationLoadBalancer.DNSName}"
+  TargetGroupArn:
+    Description: Target Group ARN
+    Value: !Ref TargetGroup
+  AlbSecurityGroupId:
+    Description: ALB Security Group ID
+    Value: !Ref AlbSecurityGroup
+  EcsSecurityGroupId:
+    Description: ECS Task Security Group ID
+    Value: !Ref EcsSecurityGroup
