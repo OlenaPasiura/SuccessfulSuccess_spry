@@ -54,6 +54,9 @@ jobs:
     name: Build, Push & Deploy to ECS Fargate
     needs: test-and-lint
     runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -61,8 +64,10 @@ jobs:
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME || 'arn:aws:iam::565905128959:role/successfulsuccess-github-actions-role' }}
+          role-to-assume: arn:aws:iam::565905128959:role/successfulsuccess-github-actions-role
+          role-session-name: GitHubActions-${{ github.run_id }}
           aws-region: ${{ env.AWS_REGION }}
+          audience: sts.amazonaws.com
 
       - name: Log in to Amazon ECR
         id: login-ecr
