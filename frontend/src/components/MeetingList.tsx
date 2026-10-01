@@ -37,12 +37,8 @@ export const MeetingList: React.FC<MeetingListProps> = ({
     <div className="space-y-4">
       <div className="flex items-center justify-between">
         <div>
-          <h2 className="text-xl font-bold tracking-tight text-gray-900">
-            Scheduled Meetings
-          </h2>
-          <p className="text-sm text-gray-500">
-            View all current meetings and participants
-          </p>
+          <h2 className="text-xl font-bold tracking-tight text-gray-900">Scheduled Meetings</h2>
+          <p className="text-sm text-gray-500">View all current meetings and participants</p>
         </div>
         <Button
           variant="outline"
@@ -71,9 +67,7 @@ export const MeetingList: React.FC<MeetingListProps> = ({
             <div className="flex items-start gap-3">
               <AlertCircle className="h-5 w-5 text-red-600 mt-0.5 shrink-0" />
               <div>
-                <h4 className="text-sm font-semibold text-red-800">
-                  Unable to load meetings
-                </h4>
+                <h4 className="text-sm font-semibold text-red-800">Unable to load meetings</h4>
                 <p className="text-sm text-red-700 mt-1">{error}</p>
               </div>
             </div>
@@ -95,9 +89,7 @@ export const MeetingList: React.FC<MeetingListProps> = ({
             <div className="h-12 w-12 rounded-full bg-blue-50 flex items-center justify-center text-blue-600">
               <Calendar className="h-6 w-6" />
             </div>
-            <h3 className="text-base font-medium text-gray-900">
-              No meetings scheduled yet
-            </h3>
+            <h3 className="text-base font-medium text-gray-900">No meetings scheduled yet</h3>
             <p className="text-sm text-gray-500 max-w-sm">
               Use the form on the left to schedule your first meeting.
             </p>
@@ -123,12 +115,11 @@ export const MeetingList: React.FC<MeetingListProps> = ({
               <div className="flex items-center gap-1.5">
                 <Clock className="h-4 w-4 text-gray-400" />
                 <span>
-                  {formatMeetingDateTime(meeting.starts_at)} &ndash; {formatMeetingDateTime(meeting.ends_at)}
+                  {formatMeetingDateTime(meeting.starts_at)} &ndash;{' '}
+                  {formatMeetingDateTime(meeting.ends_at)}
                 </span>
               </div>
-              <span className="text-xs text-gray-400 ml-auto font-mono">
-                #{meeting.id}
-              </span>
+              <span className="text-xs text-gray-400 ml-auto font-mono">#{meeting.id}</span>
             </CardContent>
           </Card>
         ))}

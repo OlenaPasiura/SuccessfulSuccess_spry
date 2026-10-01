@@ -1,6 +1,14 @@
-from datetime import datetime, timezone
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator, field_serializer
-from typing_extensions import Self
+from datetime import UTC, datetime
+from typing import Self
+
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    field_serializer,
+    field_validator,
+    model_validator,
+)
 
 
 class MeetingBase(BaseModel):
@@ -20,8 +28,8 @@ class MeetingBase(BaseModel):
     @classmethod
     def ensure_utc(cls, v: datetime) -> datetime:
         if v.tzinfo is None:
-            return v.replace(tzinfo=timezone.utc)
-        return v.astimezone(timezone.utc)
+            return v.replace(tzinfo=UTC)
+        return v.astimezone(UTC)
 
     @model_validator(mode="after")
     def validate_time_order(self) -> Self:
@@ -42,7 +50,7 @@ class MeetingResponse(MeetingBase):
     @field_serializer("starts_at", "ends_at")
     def serialize_dt(self, dt: datetime, _info) -> str:
         if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
+            dt = dt.replace(tzinfo=UTC)
         else:
-            dt = dt.astimezone(timezone.utc)
+            dt = dt.astimezone(UTC)
         return dt.strftime("%Y-%m-%dT%H:%M:%SZ")

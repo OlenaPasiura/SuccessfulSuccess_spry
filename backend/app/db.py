@@ -1,12 +1,10 @@
 import os
-from typing import Generator
-from sqlalchemy import create_engine
-from sqlalchemy.orm import declarative_base, sessionmaker, Session
+from collections.abc import Generator
 
-DATABASE_URL = os.getenv(
-    "DATABASE_URL",
-    "postgresql://spry:spry_secret@postgres:5432/spry"
-)
+from sqlalchemy import create_engine
+from sqlalchemy.orm import Session, declarative_base, sessionmaker
+
+DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://spry:spry_secret@postgres:5432/spry")
 
 # SQLAlchemy 2.1 defaults postgresql:// to psycopg (v3). If psycopg2 is used,
 # map postgresql:// to postgresql+psycopg2://

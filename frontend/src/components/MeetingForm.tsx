@@ -68,8 +68,8 @@ export const MeetingForm: React.FC<MeetingFormProps> = ({ onMeetingCreated }) =>
       setAttendeeCount(1);
       setError(null);
       onMeetingCreated();
-    } catch (err: any) {
-      setError(err.message || 'Failed to schedule meeting.');
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : 'Failed to schedule meeting.');
     } finally {
       setSubmitting(false);
     }
@@ -82,9 +82,7 @@ export const MeetingForm: React.FC<MeetingFormProps> = ({ onMeetingCreated }) =>
           <PlusCircle className="h-5 w-5 text-blue-600" />
           Schedule New Meeting
         </CardTitle>
-        <CardDescription>
-          Enter the details below to add a meeting to the schedule.
-        </CardDescription>
+        <CardDescription>Enter the details below to add a meeting to the schedule.</CardDescription>
       </CardHeader>
       <CardContent>
         {error && (

@@ -46,7 +46,11 @@ export async function createMeeting(data: CreateMeetingInput): Promise<Meeting> 
       if (errorJson.detail) {
         if (Array.isArray(errorJson.detail)) {
           errorDetail = errorJson.detail
-            .map((item: any) => item.msg || JSON.stringify(item))
+            .map((item: unknown) =>
+              typeof item === 'object' && item !== null && 'msg' in item
+                ? String((item as { msg: unknown }).msg)
+                : JSON.stringify(item)
+            )
             .join('; ');
         } else {
           errorDetail = String(errorJson.detail);

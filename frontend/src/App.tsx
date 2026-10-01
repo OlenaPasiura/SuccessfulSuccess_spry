@@ -15,16 +15,36 @@ export const App: React.FC = () => {
     try {
       const data = await fetchMeetings();
       setMeetings(data);
-    } catch (err: any) {
-      setError(err.message || 'Unable to connect to meetings service.');
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : 'Unable to connect to meetings service.');
     } finally {
       setIsLoading(false);
     }
   }, []);
 
   useEffect(() => {
-    loadMeetings();
-  }, [loadMeetings]);
+    let ignore = false;
+    async function init() {
+      try {
+        const data = await fetchMeetings();
+        if (!ignore) {
+          setMeetings(data);
+        }
+      } catch (err: unknown) {
+        if (!ignore) {
+          setError(err instanceof Error ? err.message : 'Unable to connect to meetings service.');
+        }
+      } finally {
+        if (!ignore) {
+          setIsLoading(false);
+        }
+      }
+    }
+    init();
+    return () => {
+      ignore = true;
+    };
+  }, []);
 
   return (
     <div className="min-h-screen bg-gray-50 flex flex-col">
@@ -36,9 +56,7 @@ export const App: React.FC = () => {
               <CalendarCheck2 className="h-5 w-5" />
             </div>
             <div>
-              <h1 className="text-lg font-bold text-gray-900 leading-tight">
-                SuccessfulSuccess
-              </h1>
+              <h1 className="text-lg font-bold text-gray-900 leading-tight">SuccessfulSuccess</h1>
               <p className="text-xs text-gray-500 font-mono">spry</p>
             </div>
           </div>
