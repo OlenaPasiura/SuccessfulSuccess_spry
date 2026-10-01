@@ -1,3 +1,4 @@
+unused_test_variable = 999
 import os
 
 from fastapi import FastAPI
