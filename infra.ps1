@@ -314,7 +314,13 @@ switch ($Command.ToLower()) {
             $null = Invoke-AwsCli @("cloudformation", "wait", "stack-delete-complete", "--stack-name", $EcrStack)
         } catch {}
 
-        Write-Host "=== [5/5] Cleaning up CloudWatch Logs ===" -ForegroundColor Cyan
+        Write-Host "=== [5/6] Deleting OIDC Stack ($ProjectName-oidc) ===" -ForegroundColor Cyan
+        try {
+            $null = Invoke-AwsCli @("cloudformation", "delete-stack", "--stack-name", "$ProjectName-oidc")
+            $null = Invoke-AwsCli @("cloudformation", "wait", "stack-delete-complete", "--stack-name", "$ProjectName-oidc")
+        } catch {}
+
+        Write-Host "=== [6/6] Cleaning up CloudWatch Logs ===" -ForegroundColor Cyan
         try {
             $null = Invoke-AwsCli @("logs", "delete-log-group", "--log-group-name", "/ecs/$ProjectName-backend")
         } catch {}

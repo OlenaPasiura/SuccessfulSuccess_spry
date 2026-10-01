@@ -37,6 +37,7 @@ ECR_STACK ?= $(PROJECT_NAME)-ecr
 FRONTEND_STACK ?= $(PROJECT_NAME)-frontend
 ECS_STACK ?= $(PROJECT_NAME)-ecs
 SERVICE_STACK ?= $(PROJECT_NAME)-service
+OIDC_STACK ?= $(PROJECT_NAME)-oidc
 
 STACK_TAGS = --tags "PROJECT_NAME=$(PROJECT_NAME)"
 
@@ -285,7 +286,10 @@ teardown: ## Fully delete all AWS resources (ALB, ECS, ECR, S3, CloudFront) to p
 	done
 	-$(AWS) cloudformation delete-stack --stack-name $(ECR_STACK)
 	-$(AWS) cloudformation wait stack-delete-complete --stack-name $(ECR_STACK)
-	@echo "=== [5/5] Cleaning up CloudWatch Logs ==="
+	@echo "=== [5/6] Deleting OIDC Stack ($(OIDC_STACK)) ==="
+	-$(AWS) cloudformation delete-stack --stack-name $(OIDC_STACK)
+	-$(AWS) cloudformation wait stack-delete-complete --stack-name $(OIDC_STACK)
+	@echo "=== [6/6] Cleaning up CloudWatch Logs ==="
 	-$(AWS) logs delete-log-group --log-group-name "/ecs/$(PROJECT_NAME)-backend" 2>/dev/null || true
 	@echo "=========================================================="
 	@echo "All AWS resources have been successfully deleted!"
