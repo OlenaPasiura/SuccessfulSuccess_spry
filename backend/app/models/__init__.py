@@ -1,4 +1,3 @@
-from app.models.meeting import Meeting, Participant
-from app.models.user import User
+from app.models.meeting import Meeting
 
-__all__ = ["Meeting", "Participant", "User"]
+__all__ = ["Meeting"]

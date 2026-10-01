@@ -1,19 +1,3 @@
-from app.schemas.meeting import (
-    MeetingCreate,
-    MeetingList,
-    MeetingRead,
-    ParticipantCreate,
-    ParticipantRead,
-    UserRead,
-    UserSync,
-)
+from app.schemas.meeting import MeetingBase, MeetingCreate, MeetingResponse
 
-__all__ = [
-    "MeetingCreate",
-    "MeetingList",
-    "MeetingRead",
-    "ParticipantCreate",
-    "ParticipantRead",
-    "UserRead",
-    "UserSync",
-]
+__all__ = ["MeetingBase", "MeetingCreate", "MeetingResponse"]

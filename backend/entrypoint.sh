@@ -1,9 +1,8 @@
 #!/bin/sh
 set -e
 
-if [ "${RUN_MIGRATIONS_ON_START:-true}" = "true" ]; then
-  echo "Running database migrations..."
-  alembic upgrade head
-fi
+echo "Running database migrations..."
+alembic upgrade head
 
-exec "$@"
+echo "Starting Uvicorn..."
+exec uvicorn app.main:app --host 0.0.0.0 --port 8000 "$@"

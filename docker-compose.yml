@@ -1,73 +1,43 @@
 services:
-  db:
-    image: postgres:17-alpine
-    environment:
-      POSTGRES_USER: ${POSTGRES_USER:-app}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-app}
-      POSTGRES_DB: ${POSTGRES_DB:-meetings}
+  postgres:
+    image: postgres:16-alpine
     ports:
-      - "${POSTGRES_PORT:-5432}:5432"
-    volumes:
-      - pgdata:/var/lib/postgresql/data
+      - "5432:5432"
+    environment:
+      POSTGRES_DB: spry
+      POSTGRES_USER: spry
+      POSTGRES_PASSWORD: spry_secret
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-app} -d ${POSTGRES_DB:-meetings}"]
+      test: ["CMD-SHELL", "pg_isready -U spry -d spry"]
       interval: 5s
       timeout: 5s
-      retries: 10
+      retries: 5
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
 
   backend:
     build:
       context: ./backend
-      args:
-        INSTALL_DEV: "true"
-    environment:
-      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-app}:${POSTGRES_PASSWORD:-app}@db:5432/${POSTGRES_DB:-meetings}
-      APP_TIMEZONE: ${APP_TIMEZONE:-Europe/Kyiv}
-      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000}
-      LOG_LEVEL: ${LOG_LEVEL:-INFO}
-      RUN_MIGRATIONS_ON_START: ${RUN_MIGRATIONS_ON_START:-true}
-      # File events from a Windows (or some VM) bind mount never reach the
-      # container, so --reload polls instead — the backend twin of WATCHPACK_POLLING.
-      WATCHFILES_FORCE_POLLING: "true"
-      # From `make aws-auth-env`; the API refuses meetings requests without them.
-      COGNITO_REGION: ${AWS_REGION:-us-east-1}
-      COGNITO_USER_POOL_ID: ${COGNITO_USER_POOL_ID:-}
-      COGNITO_CLIENT_ID: ${COGNITO_CLIENT_ID:-}
-    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+      dockerfile: Dockerfile
     ports:
-      - "${BACKEND_PORT:-8000}:8000"
-    volumes:
-      - ./backend:/app
+      - "8000:8000"
     depends_on:
-      db:
+      postgres:
         condition: service_healthy
-    healthcheck:
-      test: ["CMD-SHELL", "curl -fsS http://localhost:8000/health || exit 1"]
-      interval: 10s
-      timeout: 5s
-      retries: 10
-      start_period: 20s
+    environment:
+      DATABASE_URL: postgresql://spry:spry_secret@postgres:5432/spry
+      CORS_ALLOWED_ORIGINS: http://localhost:5173
 
   frontend:
     build:
       context: ./frontend
-      target: dev
-    environment:
-      NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-http://localhost:8000}
-      NEXT_PUBLIC_COGNITO_USER_POOL_ID: ${COGNITO_USER_POOL_ID:-}
-      NEXT_PUBLIC_COGNITO_CLIENT_ID: ${COGNITO_CLIENT_ID:-}
-      NEXT_PUBLIC_COGNITO_DOMAIN: ${COGNITO_DOMAIN:-}
-      NEXT_PUBLIC_COGNITO_GOOGLE_ENABLED: ${COGNITO_GOOGLE_ENABLED:-false}
-      WATCHPACK_POLLING: "true"
+      dockerfile: Dockerfile
     ports:
-      - "${FRONTEND_PORT:-3000}:3000"
-    volumes:
-      - ./frontend:/app
-      - /app/node_modules
-      - /app/.next
+      - "5173:5173"
     depends_on:
-      backend:
-        condition: service_started
+      - backend
+    environment:
+      VITE_API_URL: http://localhost:8000
 
 volumes:
-  pgdata:
+  postgres_data:

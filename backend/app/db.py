@@ -1,27 +1,27 @@
-"""Database engine, session factory and the FastAPI session dependency."""
+import os
+from typing import Generator
+from sqlalchemy import create_engine
+from sqlalchemy.orm import declarative_base, sessionmaker, Session
 
-from collections.abc import AsyncIterator
+DATABASE_URL = os.getenv(
+    "DATABASE_URL",
+    "postgresql://spry:spry_secret@postgres:5432/spry"
+)
 
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
-from sqlalchemy.orm import DeclarativeBase
+# SQLAlchemy 2.1 defaults postgresql:// to psycopg (v3). If psycopg2 is used,
+# map postgresql:// to postgresql+psycopg2://
+if DATABASE_URL.startswith("postgresql://"):
+    DATABASE_URL = DATABASE_URL.replace("postgresql://", "postgresql+psycopg2://", 1)
 
-from app.config import settings
+engine = create_engine(DATABASE_URL, echo=False, pool_pre_ping=True)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
-
-class Base(DeclarativeBase):
-    """Declarative base for every ORM model."""
-
-
-engine = create_async_engine(settings.database_url, echo=False, pool_pre_ping=True)
-
-SessionFactory = async_sessionmaker(engine, expire_on_commit=False, autoflush=False)
+Base = declarative_base()
 
 
-async def get_session() -> AsyncIterator[AsyncSession]:
-    """Yield a session and roll back if the request handler raises."""
-    async with SessionFactory() as session:
-        try:
-            yield session
-        except Exception:
-            await session.rollback()
-            raise
+def get_db() -> Generator[Session, None, None]:
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()

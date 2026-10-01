@@ -1,52 +1,19 @@
-"""FastAPI application factory."""
-
-import logging
-
-from fastapi import FastAPI, status
+import os
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy import text
+from app.api.meetings import router as meetings_router
 
-from app.api.v1 import api_router
-from app.config import settings
-from app.db import SessionFactory
-from app.errors import error_response, register_exception_handlers
+app = FastAPI(title="SuccessfulSuccess_spry")
 
-logging.basicConfig(level=settings.log_level.upper())
-logger = logging.getLogger("meetings")
+cors_origins_raw = os.getenv("CORS_ALLOWED_ORIGINS", "http://localhost:5173")
+origins = [origin.strip() for origin in cors_origins_raw.split(",") if origin.strip()]
 
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-def create_app() -> FastAPI:
-    app = FastAPI(
-        title="SuccessfulSuccess Meetings API",
-        version=settings.version,
-        summary="Each signed-in user's meetings for today: list, create, edit, delete.",
-    )
-
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=settings.cors_origin_list,
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
-        expose_headers=["Location"],
-    )
-
-    register_exception_handlers(app)
-    app.include_router(api_router)
-
-    @app.get("/health", tags=["health"], summary="Liveness and database check")
-    async def health():
-        try:
-            async with SessionFactory() as session:
-                await session.execute(text("SELECT 1"))
-        except Exception:
-            logger.exception("Health check failed: database unreachable")
-            return error_response(
-                status.HTTP_503_SERVICE_UNAVAILABLE, "The database is unreachable."
-            )
-        return {"status": "ok", "database": "ok", "version": settings.version}
-
-    return app
-
-
-app = create_app()
+app.include_router(meetings_router)

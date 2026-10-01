@@ -391,3 +391,13 @@ There is no deploy (CD) stage — no target is configured yet.
 - The frontend runs `next dev` in the container with the same bind mount.
 - Backend tests run against a real Postgres (`meetings_test`), truncating tables
   between tests; `make test` creates that database if it is missing.
+
+
+
+## Monorepo Architecture & Rationale
+
+This repository is structured as a **monorepo** containing the `backend/`, `frontend/`, and infrastructure configuration (`docker-compose.yml`).
+
+### Architectural Rationale
+1. **Atomic Changes:** Having the API specification, frontend client, and database migrations in a single codebase allows unified commits. Endpoint modifications and client updates never drift apart or cause contract mismatch issues.
+2. **AI Agent Context Window:** In an AI-assisted development workflow, the repository serves as the complete context window. Housing all services in a single repository tree enables the AI coding agent to inspect backend routes, ORM models, and frontend components simultaneously in a single pass without hallucinating interface contracts.

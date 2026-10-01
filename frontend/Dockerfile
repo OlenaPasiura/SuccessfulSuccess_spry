@@ -1,56 +1,12 @@
-# --- dependencies -----------------------------------------------------------
-FROM node:22-alpine AS deps
-WORKDIR /app
-COPY package.json package-lock.json* ./
-RUN npm ci
+FROM node:20-alpine
 
-# --- development (used by docker compose) -----------------------------------
-FROM node:22-alpine AS dev
 WORKDIR /app
-ENV NEXT_TELEMETRY_DISABLED=1
-COPY --from=deps /app/node_modules ./node_modules
+
+COPY package*.json ./
+RUN npm install
+
 COPY . .
-EXPOSE 3000
-CMD ["npm", "run", "dev", "--", "-p", "3000", "-H", "0.0.0.0"]
 
-# --- production build -------------------------------------------------------
-FROM node:22-alpine AS builder
-WORKDIR /app
-ENV NEXT_TELEMETRY_DISABLED=1
-COPY --from=deps /app/node_modules ./node_modules
-COPY . .
-RUN npm run build
+EXPOSE 5173
 
-FROM node:22-alpine AS production
-WORKDIR /app
-ENV NODE_ENV=production NEXT_TELEMETRY_DISABLED=1
-RUN addgroup -g 1001 -S nodejs && adduser -S nextjs -u 1001
-COPY --from=builder /app/public ./public
-COPY --from=builder --chown=nextjs:nodejs /app/.next/standalone ./
-COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./.next/static
-USER nextjs
-EXPOSE 3000
-CMD ["node", "server.js"]
-
-# --- static export (used by `make aws-deploy-frontend`) ---------------------
-FROM node:22-alpine AS export-builder
-WORKDIR /app
-ARG NEXT_PUBLIC_API_BASE_URL
-ARG NEXT_PUBLIC_COGNITO_USER_POOL_ID
-ARG NEXT_PUBLIC_COGNITO_CLIENT_ID
-ARG NEXT_PUBLIC_COGNITO_DOMAIN
-ARG NEXT_PUBLIC_COGNITO_GOOGLE_ENABLED=false
-ENV NEXT_TELEMETRY_DISABLED=1 \
-    NEXT_OUTPUT=export \
-    NEXT_PUBLIC_API_BASE_URL=$NEXT_PUBLIC_API_BASE_URL \
-    NEXT_PUBLIC_COGNITO_USER_POOL_ID=$NEXT_PUBLIC_COGNITO_USER_POOL_ID \
-    NEXT_PUBLIC_COGNITO_CLIENT_ID=$NEXT_PUBLIC_COGNITO_CLIENT_ID \
-    NEXT_PUBLIC_COGNITO_DOMAIN=$NEXT_PUBLIC_COGNITO_DOMAIN \
-    NEXT_PUBLIC_COGNITO_GOOGLE_ENABLED=$NEXT_PUBLIC_COGNITO_GOOGLE_ENABLED
-COPY --from=deps /app/node_modules ./node_modules
-COPY . .
-RUN npm run build
-
-# Nothing but the files, so `docker build --output` can drop them on the host.
-FROM scratch AS export
-COPY --from=export-builder /app/out /
+CMD ["npm", "run", "dev", "--", "--host", "0.0.0.0", "--port", "5173"]
