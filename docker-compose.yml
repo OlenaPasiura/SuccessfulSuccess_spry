@@ -38,6 +38,11 @@ services:
       - backend
     environment:
       VITE_API_URL: http://localhost:8000
+      VITE_COGNITO_REGION: ${VITE_COGNITO_REGION:-us-east-1}
+      VITE_COGNITO_USER_POOL_ID: ${VITE_COGNITO_USER_POOL_ID}
+      VITE_COGNITO_CLIENT_ID: ${VITE_COGNITO_CLIENT_ID}
+      VITE_COGNITO_DOMAIN: ${VITE_COGNITO_DOMAIN}
+      VITE_COGNITO_REDIRECT_URI: ${VITE_COGNITO_REDIRECT_URI:-http://localhost:5173/}
 
 volumes:
   postgres_data:

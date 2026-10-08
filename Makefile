@@ -38,6 +38,7 @@ FRONTEND_STACK ?= $(PROJECT_NAME)-frontend
 ECS_STACK ?= $(PROJECT_NAME)-ecs
 SERVICE_STACK ?= $(PROJECT_NAME)-service
 OIDC_STACK ?= $(PROJECT_NAME)-oidc
+AUTH_STACK ?= $(PROJECT_NAME)-auth
 
 STACK_TAGS = --tags "PROJECT_NAME=$(PROJECT_NAME)"
 
@@ -233,7 +234,14 @@ deploy: ## Deploy/update ECS Fargate service and update static files in S3 + Clo
 	$(AWS) ecs update-service --cluster "$$cluster" --service "$(PROJECT_NAME)-backend-service" --force-new-deployment >/dev/null 2>&1 || true; \
 	echo "=== [2/2] Updating Static Files in S3 + Invalidating CloudFront Cache ==="; \
 	echo "Building frontend static assets with VITE_API_URL=$$alb_url..."; \
-	docker build --build-arg "VITE_API_URL=$$alb_url" --target export --output type=local,dest=frontend/dist -f frontend/Dockerfile.build ./frontend || exit 1; \
+	docker build \
+		--build-arg "VITE_API_URL=$$alb_url" \
+		--build-arg "VITE_COGNITO_REGION=$(AWS_REGION)" \
+		--build-arg "VITE_COGNITO_USER_POOL_ID=$(VITE_COGNITO_USER_POOL_ID)" \
+		--build-arg "VITE_COGNITO_CLIENT_ID=$(VITE_COGNITO_CLIENT_ID)" \
+		--build-arg "VITE_COGNITO_DOMAIN=$(VITE_COGNITO_DOMAIN)" \
+		--build-arg "VITE_COGNITO_REDIRECT_URI=$$site_url/" \
+		--target export --output type=local,dest=frontend/dist -f frontend/Dockerfile.build ./frontend || exit 1; \
 	echo "Uploading static files to S3 (s3://$$bucket)..."; \
 	$(AWS) s3 sync frontend/dist "s3://$$bucket" --delete --exclude "*.html" \
 		--cache-control "public,max-age=31536000,immutable" || exit 1; \
@@ -248,6 +256,66 @@ deploy: ## Deploy/update ECS Fargate service and update static files in S3 + Clo
 	echo "Backend Health Check: $$alb_url/health"; \
 	echo "Frontend Site URL:    $$site_url"; \
 	echo "=========================================================="
+
+deploy-frontend: ## Build and deploy frontend static files to S3 + invalidate CloudFront cache
+	$(require-aws-credentials)
+	@bucket=$$($(call stack-output,$(FRONTEND_STACK),BucketName) 2>/dev/null | tr -d '[:space:]'); \
+	dist=$$($(call stack-output,$(FRONTEND_STACK),DistributionId) 2>/dev/null | tr -d '[:space:]'); \
+	site_url=$$($(call stack-output,$(FRONTEND_STACK),SiteUrl) 2>/dev/null | tr -d '[:space:]'); \
+	alb_url=$$($(call stack-output,$(ECS_STACK),AlbUrl) 2>/dev/null | tr -d '[:space:]'); \
+	test -n "$$bucket" -a "$$bucket" != "None" || { echo "ERROR: Frontend stack not found. Run 'make aws-init' first."; exit 1; }; \
+	echo "=== Building frontend static assets for CloudFront ($$site_url) ==="; \
+	docker build \
+		--build-arg "VITE_API_URL=$$alb_url" \
+		--build-arg "VITE_COGNITO_REGION=$(AWS_REGION)" \
+		--build-arg "VITE_COGNITO_USER_POOL_ID=$(VITE_COGNITO_USER_POOL_ID)" \
+		--build-arg "VITE_COGNITO_CLIENT_ID=$(VITE_COGNITO_CLIENT_ID)" \
+		--build-arg "VITE_COGNITO_DOMAIN=$(VITE_COGNITO_DOMAIN)" \
+		--build-arg "VITE_COGNITO_REDIRECT_URI=$$site_url/" \
+		--target export --output type=local,dest=frontend/dist -f frontend/Dockerfile.build ./frontend || exit 1; \
+	echo "Uploading static files to S3 (s3://$$bucket)..."; \
+	$(AWS) s3 sync frontend/dist "s3://$$bucket" --delete --exclude "*.html" \
+		--cache-control "public,max-age=31536000,immutable" || exit 1; \
+	$(AWS) s3 sync frontend/dist "s3://$$bucket" --delete --exclude "*" --include "*.html" \
+		--cache-control "no-cache" || exit 1; \
+	echo "Invalidating CloudFront cache ($$dist)..."; \
+	$(AWS) cloudfront create-invalidation --distribution-id "$$dist" --paths "/*" \
+		--query 'Invalidation.Status' --output text; \
+	echo "=========================================================="; \
+	echo "Frontend successfully deployed to CloudFront!"; \
+	echo "Frontend Site URL: $$site_url"; \
+	echo "=========================================================="
+
+
+aws-deploy-auth: ## Deploy Cognito User Pool & Google OAuth stack
+	$(require-aws-credentials)
+	@echo "=== Deploying Cognito & Google OAuth Stack ($(AUTH_STACK)) ==="
+	@$(call wait-stack-idle,$(AUTH_STACK))
+	$(AWS) cloudformation deploy \
+		--stack-name $(AUTH_STACK) \
+		--template-file infra/auth.yml \
+		--no-fail-on-empty-changeset \
+		$(STACK_TAGS) \
+		--parameter-overrides \
+			ProjectName=$(PROJECT_NAME) \
+			GoogleClientId="$(GOOGLE_CLIENT_ID)" \
+			GoogleClientSecret="$(GOOGLE_CLIENT_SECRET)"
+	@echo "=== Auth Stack Outputs ==="
+	@echo "User Pool ID:        $$($(call stack-output,$(AUTH_STACK),UserPoolId))"
+	@echo "User Pool Client ID: $$($(call stack-output,$(AUTH_STACK),UserPoolClientId))"
+	@echo "Hosted Domain:       $$($(call stack-output,$(AUTH_STACK),HostedDomain))"
+	@echo "Google Redirect URI: $$($(call stack-output,$(AUTH_STACK),GoogleRedirectUri))"
+
+aws-auth-env: ## Print Cognito configuration environment variables
+	@echo "# --- Cognito Configuration (copy into .env) ---"
+	@echo "COGNITO_REGION=$(AWS_REGION)"
+	@echo "COGNITO_USER_POOL_ID=$$($(call stack-output,$(AUTH_STACK),UserPoolId))"
+	@echo "COGNITO_CLIENT_ID=$$($(call stack-output,$(AUTH_STACK),UserPoolClientId))"
+	@echo "VITE_COGNITO_REGION=$(AWS_REGION)"
+	@echo "VITE_COGNITO_USER_POOL_ID=$$($(call stack-output,$(AUTH_STACK),UserPoolId))"
+	@echo "VITE_COGNITO_CLIENT_ID=$$($(call stack-output,$(AUTH_STACK),UserPoolClientId))"
+	@echo "VITE_COGNITO_DOMAIN=$$($(call stack-output,$(AUTH_STACK),HostedDomain))"
+	@echo "VITE_COGNITO_REDIRECT_URI=http://localhost:5173/"
 
 teardown: ## Fully delete all AWS resources (ALB, ECS, ECR, S3, CloudFront) to prevent charges
 	$(require-aws-credentials)

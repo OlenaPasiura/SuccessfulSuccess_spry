@@ -8,9 +8,10 @@ import { PlusCircle, AlertCircle, Loader2 } from 'lucide-react';
 
 interface MeetingFormProps {
   onMeetingCreated: () => void;
+  token?: string;
 }
 
-export const MeetingForm: React.FC<MeetingFormProps> = ({ onMeetingCreated }) => {
+export const MeetingForm: React.FC<MeetingFormProps> = ({ onMeetingCreated, token }) => {
   const [title, setTitle] = useState('');
   const [startsAt, setStartsAt] = useState('');
   const [endsAt, setEndsAt] = useState('');
@@ -54,12 +55,15 @@ export const MeetingForm: React.FC<MeetingFormProps> = ({ onMeetingCreated }) =>
 
     setSubmitting(true);
     try {
-      await createMeeting({
-        title: trimmedTitle,
-        starts_at: startDate.toISOString(),
-        ends_at: endDate.toISOString(),
-        attendee_count: attendees,
-      });
+      await createMeeting(
+        {
+          title: trimmedTitle,
+          starts_at: startDate.toISOString(),
+          ends_at: endDate.toISOString(),
+          attendee_count: attendees,
+        },
+        token
+      );
 
       // Clear form on success
       setTitle('');

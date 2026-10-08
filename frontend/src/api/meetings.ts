@@ -17,9 +17,13 @@ const getBaseUrl = (): string => {
   return import.meta.env.VITE_API_URL || 'http://localhost:8000';
 };
 
-export async function fetchMeetings(): Promise<Meeting[]> {
+export async function fetchMeetings(token?: string): Promise<Meeting[]> {
   const baseUrl = getBaseUrl();
-  const response = await fetch(`${baseUrl}/api/meetings`);
+  const headers: Record<string, string> = {};
+  if (token) {
+    headers['Authorization'] = `Bearer ${token}`;
+  }
+  const response = await fetch(`${baseUrl}/api/meetings`, { headers });
 
   if (!response.ok) {
     const errorText = await response.text();
@@ -29,13 +33,17 @@ export async function fetchMeetings(): Promise<Meeting[]> {
   return response.json();
 }
 
-export async function createMeeting(data: CreateMeetingInput): Promise<Meeting> {
+export async function createMeeting(data: CreateMeetingInput, token?: string): Promise<Meeting> {
   const baseUrl = getBaseUrl();
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+  };
+  if (token) {
+    headers['Authorization'] = `Bearer ${token}`;
+  }
   const response = await fetch(`${baseUrl}/api/meetings`, {
     method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-    },
+    headers,
     body: JSON.stringify(data),
   });
 

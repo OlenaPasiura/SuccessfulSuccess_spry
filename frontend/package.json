@@ -15,8 +15,10 @@
   "dependencies": {
     "clsx": "^2.1.1",
     "lucide-react": "^0.475.0",
+    "oidc-client-ts": "^3.5.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
+    "react-oidc-context": "^3.3.1",
     "tailwind-merge": "^2.6.0"
   },
   "devDependencies": {

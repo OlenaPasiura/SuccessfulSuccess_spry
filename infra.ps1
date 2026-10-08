@@ -35,6 +35,7 @@ $EcrStack = "$ProjectName-ecr"
 $FrontendStack = "$ProjectName-frontend"
 $EcsStack = "$ProjectName-ecs"
 $ServiceStack = "$ProjectName-service"
+$AuthStack = "$ProjectName-auth"
 
 function Invoke-AwsCli {
     param([string[]]$CliArgs)
@@ -100,6 +101,9 @@ switch ($Command.ToLower()) {
         Write-Host "  infra-up     - Alias for aws-init"
         Write-Host "  build-push   - Build Docker images (linux/amd64), tag and push to ECR"
         Write-Host "  deploy       - Launch/update ECS Fargate (0.25 vCPU / 0.5 GB RAM) + S3 & CloudFront"
+        Write-Host "  deploy-frontend - Build and deploy frontend to S3 and invalidate CloudFront"
+        Write-Host "  aws-deploy-auth - Deploy Cognito User Pool and Google OAuth"
+        Write-Host "  aws-auth-env    - Print Cognito environment variables for .env"
         Write-Host "  teardown     - Fully destroy all AWS resources (ALB, ECS, ECR, S3, CloudFront) for 0 charges"
         Write-Host "  infra-down   - Alias for teardown"
         Write-Host "  aws-status   - Display status and outputs of AWS stacks"
@@ -109,6 +113,82 @@ switch ($Command.ToLower()) {
     "aws-whoami" {
         Assert-AwsCredentials
         Invoke-AwsCli @("sts", "get-caller-identity")
+    }
+
+    "aws-deploy-auth" {
+        Assert-AwsCredentials
+        Write-Host "=== Deploying Cognito & Google OAuth Stack ($AuthStack) ===" -ForegroundColor Cyan
+        Wait-StackIdle -StackName $AuthStack
+
+        $cfUrl = Get-StackOutput -StackName $FrontendStack -OutputKey "SiteUrl"
+        $appUrlsList = @("http://localhost:5173/", "http://localhost:3000/")
+        if ($cfUrl -and $cfUrl -ne "None") {
+            $cfUrlFormatted = if ($cfUrl.EndsWith("/")) { $cfUrl } else { "$cfUrl/" }
+            if ($appUrlsList -notcontains $cfUrlFormatted) {
+                $appUrlsList += $cfUrlFormatted
+            }
+        }
+        $appUrlsParam = $appUrlsList -join ","
+
+        $paramOverrides = @(
+            "ProjectName=$ProjectName",
+            "AppUrls=$appUrlsParam"
+        )
+        if ($env:GOOGLE_CLIENT_ID) {
+            $paramOverrides += "GoogleClientId=$($env:GOOGLE_CLIENT_ID)"
+        }
+        if ($env:GOOGLE_CLIENT_SECRET) {
+            $paramOverrides += "GoogleClientSecret=$($env:GOOGLE_CLIENT_SECRET)"
+        }
+
+        $deployArgs = @(
+            "cloudformation", "deploy",
+            "--stack-name", $AuthStack,
+            "--template-file", "infra/auth.yml",
+            "--no-fail-on-empty-changeset",
+            "--tags", "PROJECT_NAME=$ProjectName",
+            "--parameter-overrides"
+        ) + $paramOverrides
+
+        Invoke-AwsCli $deployArgs
+        Wait-StackIdle -StackName $AuthStack
+
+        Write-Host "=== Auth Stack Outputs ===" -ForegroundColor Green
+        $userPoolId = Get-StackOutput -StackName $AuthStack -OutputKey "UserPoolId"
+        $clientId = Get-StackOutput -StackName $AuthStack -OutputKey "UserPoolClientId"
+        $hostedDomain = Get-StackOutput -StackName $AuthStack -OutputKey "HostedDomain"
+        $googleRedirectUri = Get-StackOutput -StackName $AuthStack -OutputKey "GoogleRedirectUri"
+        $googleEnabled = Get-StackOutput -StackName $AuthStack -OutputKey "GoogleEnabled"
+
+        Write-Host "User Pool ID:        $userPoolId" -ForegroundColor Cyan
+        Write-Host "User Pool Client ID: $clientId" -ForegroundColor Cyan
+        Write-Host "Hosted Domain:       $hostedDomain" -ForegroundColor Cyan
+        Write-Host "Google Enabled:      $googleEnabled" -ForegroundColor Cyan
+        Write-Host "Google Redirect URI: $googleRedirectUri" -ForegroundColor Yellow
+        Write-Host ""
+        Write-Host "IMPORTANT: In Google Cloud Console, ensure '$googleRedirectUri' is added to 'Authorized redirect URIs'!" -ForegroundColor Magenta
+    }
+
+    "aws-auth-env" {
+        Assert-AwsCredentials
+        $userPoolId = Get-StackOutput -StackName $AuthStack -OutputKey "UserPoolId"
+        $clientId = Get-StackOutput -StackName $AuthStack -OutputKey "UserPoolClientId"
+        $hostedDomain = Get-StackOutput -StackName $AuthStack -OutputKey "HostedDomain"
+
+        if (-not $userPoolId) {
+            Write-Host "Auth stack ($AuthStack) does not exist yet. Run '.\infra.ps1 aws-deploy-auth' first." -ForegroundColor Red
+            return
+        }
+
+        Write-Host "# --- Cognito Configuration (copy into .env) ---" -ForegroundColor Green
+        Write-Host "COGNITO_REGION=$AwsRegion"
+        Write-Host "COGNITO_USER_POOL_ID=$userPoolId"
+        Write-Host "COGNITO_CLIENT_ID=$clientId"
+        Write-Host "VITE_COGNITO_REGION=$AwsRegion"
+        Write-Host "VITE_COGNITO_USER_POOL_ID=$userPoolId"
+        Write-Host "VITE_COGNITO_CLIENT_ID=$clientId"
+        Write-Host "VITE_COGNITO_DOMAIN=$hostedDomain"
+        Write-Host "VITE_COGNITO_REDIRECT_URI=http://localhost:5173/"
     }
 
     { $_ -in "aws-init", "infra-up" } {
@@ -242,7 +322,15 @@ switch ($Command.ToLower()) {
 
         Write-Host "=== [2/2] Updating Static Files in S3 + Invalidating CloudFront Cache ===" -ForegroundColor Cyan
         Write-Host "Building frontend static assets with VITE_API_URL=$albUrl..." -ForegroundColor Cyan
-        docker build --build-arg "VITE_API_URL=$albUrl" --target export --output type=local,dest=frontend/dist -f frontend/Dockerfile.build ./frontend
+        $siteUrlFormatted = if ($siteUrl.EndsWith("/")) { $siteUrl } else { "$siteUrl/" }
+        docker build `
+            --build-arg "VITE_API_URL=$albUrl" `
+            --build-arg "VITE_COGNITO_REGION=$AwsRegion" `
+            --build-arg "VITE_COGNITO_USER_POOL_ID=$($env:VITE_COGNITO_USER_POOL_ID)" `
+            --build-arg "VITE_COGNITO_CLIENT_ID=$($env:VITE_COGNITO_CLIENT_ID)" `
+            --build-arg "VITE_COGNITO_DOMAIN=$($env:VITE_COGNITO_DOMAIN)" `
+            --build-arg "VITE_COGNITO_REDIRECT_URI=$siteUrlFormatted" `
+            --target export --output type=local,dest=frontend/dist -f frontend/Dockerfile.build ./frontend
 
         Write-Host "Uploading static files to S3 (s3://$bucket)..." -ForegroundColor Cyan
         Invoke-AwsCli @("s3", "sync", "frontend/dist", "s3://$bucket", "--delete", "--exclude", "*.html", "--cache-control", "public,max-age=31536000,immutable")
@@ -256,6 +344,42 @@ switch ($Command.ToLower()) {
         Write-Host "Backend API URL:      $albUrl"
         Write-Host "Backend Health Check: $albUrl/health"
         Write-Host "Frontend Site URL:    $siteUrl"
+        Write-Host "==========================================================" -ForegroundColor Green
+    }
+
+    "deploy-frontend" {
+        Assert-AwsCredentials
+        $bucket = Get-StackOutput -StackName $FrontendStack -OutputKey "BucketName"
+        $dist = Get-StackOutput -StackName $FrontendStack -OutputKey "DistributionId"
+        $siteUrl = Get-StackOutput -StackName $FrontendStack -OutputKey "SiteUrl"
+        $albUrl = Get-StackOutput -StackName $EcsStack -OutputKey "AlbUrl"
+
+        if (-not $bucket -or $bucket -eq "None") {
+            Write-Host "ERROR: Frontend infrastructure not found. Run 'aws-init' first." -ForegroundColor Red
+            exit 1
+        }
+
+        Write-Host "=== Building frontend static assets for CloudFront ($siteUrl) ===" -ForegroundColor Cyan
+        $siteUrlFormatted = if ($siteUrl.EndsWith("/")) { $siteUrl } else { "$siteUrl/" }
+        docker build `
+            --build-arg "VITE_API_URL=$albUrl" `
+            --build-arg "VITE_COGNITO_REGION=$AwsRegion" `
+            --build-arg "VITE_COGNITO_USER_POOL_ID=$($env:VITE_COGNITO_USER_POOL_ID)" `
+            --build-arg "VITE_COGNITO_CLIENT_ID=$($env:VITE_COGNITO_CLIENT_ID)" `
+            --build-arg "VITE_COGNITO_DOMAIN=$($env:VITE_COGNITO_DOMAIN)" `
+            --build-arg "VITE_COGNITO_REDIRECT_URI=$siteUrlFormatted" `
+            --target export --output type=local,dest=frontend/dist -f frontend/Dockerfile.build ./frontend
+
+        Write-Host "Uploading static files to S3 (s3://$bucket)..." -ForegroundColor Cyan
+        Invoke-AwsCli @("s3", "sync", "frontend/dist", "s3://$bucket", "--delete", "--exclude", "*.html", "--cache-control", "public,max-age=31536000,immutable")
+        Invoke-AwsCli @("s3", "sync", "frontend/dist", "s3://$bucket", "--delete", "--exclude", "*", "--include", "*.html", "--cache-control", "no-cache")
+
+        Write-Host "Invalidating CloudFront cache ($dist)..." -ForegroundColor Cyan
+        Invoke-AwsCli @("cloudfront", "create-invalidation", "--distribution-id", $dist, "--paths", "/*", "--query", "Invalidation.Status", "--output", "text")
+
+        Write-Host "==========================================================" -ForegroundColor Green
+        Write-Host "Frontend successfully deployed to CloudFront!" -ForegroundColor Green
+        Write-Host "Frontend Site URL: $siteUrl" -ForegroundColor Green
         Write-Host "==========================================================" -ForegroundColor Green
     }
 
@@ -314,13 +438,19 @@ switch ($Command.ToLower()) {
             $null = Invoke-AwsCli @("cloudformation", "wait", "stack-delete-complete", "--stack-name", $EcrStack)
         } catch {}
 
-        Write-Host "=== [5/6] Deleting OIDC Stack ($ProjectName-oidc) ===" -ForegroundColor Cyan
+        Write-Host "=== [5/7] Deleting OIDC Stack ($ProjectName-oidc) ===" -ForegroundColor Cyan
         try {
             $null = Invoke-AwsCli @("cloudformation", "delete-stack", "--stack-name", "$ProjectName-oidc")
             $null = Invoke-AwsCli @("cloudformation", "wait", "stack-delete-complete", "--stack-name", "$ProjectName-oidc")
         } catch {}
 
-        Write-Host "=== [6/6] Cleaning up CloudWatch Logs ===" -ForegroundColor Cyan
+        Write-Host "=== [6/7] Deleting Auth Stack ($AuthStack) ===" -ForegroundColor Cyan
+        try {
+            $null = Invoke-AwsCli @("cloudformation", "delete-stack", "--stack-name", $AuthStack)
+            $null = Invoke-AwsCli @("cloudformation", "wait", "stack-delete-complete", "--stack-name", $AuthStack)
+        } catch {}
+
+        Write-Host "=== [7/7] Cleaning up CloudWatch Logs ===" -ForegroundColor Cyan
         try {
             $null = Invoke-AwsCli @("logs", "delete-log-group", "--log-group-name", "/ecs/$ProjectName-backend")
         } catch {}
@@ -333,12 +463,15 @@ switch ($Command.ToLower()) {
 
     "aws-status" {
         Assert-AwsCredentials
-        foreach ($stack in @($EcrStack, $FrontendStack, $EcsStack, $ServiceStack)) {
+        foreach ($stack in @($EcrStack, $FrontendStack, $EcsStack, $ServiceStack, $AuthStack)) {
             Write-Host "=== Stack: $stack ===" -ForegroundColor Cyan
-            try {
+            $status = (Invoke-AwsCli @("cloudformation", "describe-stacks", "--stack-name", $stack,
+                "--query", "Stacks[0].StackStatus", "--output", "text") 2>$null)
+            if ($status -and $status -ne "None" -and -not ($status -match "Error")) {
+                Write-Host "Status: $status" -ForegroundColor Green
                 Invoke-AwsCli @("cloudformation", "describe-stacks", "--stack-name", $stack,
-                    "--query", "Stacks[0].[StackName,StackStatus,Outputs]", "--output", "table")
-            } catch {
+                    "--query", "Stacks[0].Outputs", "--output", "table")
+            } else {
                 Write-Host "Stack $stack does not exist." -ForegroundColor Gray
             }
         }
