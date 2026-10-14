@@ -39,6 +39,7 @@ ECS_STACK ?= $(PROJECT_NAME)-ecs
 SERVICE_STACK ?= $(PROJECT_NAME)-service
 OIDC_STACK ?= $(PROJECT_NAME)-oidc
 AUTH_STACK ?= $(PROJECT_NAME)-auth
+REPORTS_STACK ?= $(PROJECT_NAME)-reports
 
 STACK_TAGS = --tags "PROJECT_NAME=$(PROJECT_NAME)"
 
@@ -64,7 +65,7 @@ endef
 
 .PHONY: help up up-build down down-v logs ps migrate test lint fmt \
         aws-whoami aws-init infra-up build-push deploy teardown infra-down \
-        aws-status aws-logs aws-url
+        aws-status aws-logs aws-url deploy-reports report-now
 
 help: ## Show this help message
 	@grep -hE '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-20s\033[0m %s\n", $$1, $$2}'
@@ -316,6 +317,68 @@ aws-auth-env: ## Print Cognito configuration environment variables
 	@echo "VITE_COGNITO_CLIENT_ID=$$($(call stack-output,$(AUTH_STACK),UserPoolClientId))"
 	@echo "VITE_COGNITO_DOMAIN=$$($(call stack-output,$(AUTH_STACK),HostedDomain))"
 	@echo "VITE_COGNITO_REDIRECT_URI=http://localhost:5173/"
+
+deploy-reports: ## Deploy S3 reports bucket and S3 VPC Gateway Endpoint stack
+	$(require-aws-credentials)
+	@echo "=== Deploying Reports Infrastructure Stack ($(REPORTS_STACK)) ==="
+	@vpc=$$($(AWS) ec2 describe-vpcs --filters Name=isDefault,Values=true \
+		--query 'Vpcs[0].VpcId' --output text 2>/dev/null | tr -d '[:space:]'); \
+	test "$$vpc" != "None" -a -n "$$vpc" || { \
+		vpc=$$($(AWS) ec2 describe-vpcs --query 'Vpcs[0].VpcId' --output text | tr -d '[:space:]'); }; \
+	test -n "$$vpc" -a "$$vpc" != "None" || { echo "ERROR: No VPC found in $(AWS_REGION)"; exit 1; }; \
+	rtb=$$($(AWS) ec2 describe-route-tables --filters Name=vpc-id,Values=$$vpc \
+		--query 'RouteTables[].RouteTableId' --output text 2>/dev/null | tr '\t ' ',' | sed 's/,*$$//'); \
+	subnets=$$($(AWS) ec2 describe-subnets --filters Name=vpc-id,Values=$$vpc \
+		--query 'Subnets[?MapPublicIpOnLaunch==`true`].SubnetId' --output text 2>/dev/null | tr '\t ' ',' | sed 's/,*$$//'); \
+	test -n "$$subnets" || subnets=$$($(AWS) ec2 describe-subnets --filters Name=vpc-id,Values=$$vpc \
+		--query 'Subnets[].SubnetId' --output text 2>/dev/null | tr '\t ' ',' | sed 's/,*$$//'); \
+	repo=$$($(call stack-output,$(ECR_STACK),BackendRepositoryUri) 2>/dev/null | tr -d '[:space:]'); \
+	ecs_sg=$$($(call stack-output,$(ECS_STACK),EcsSecurityGroupId) 2>/dev/null | tr -d '[:space:]'); \
+	db_url=$${AWS_DATABASE_URL:-sqlite:////tmp/meetings.db}; \
+	echo "Deploying into VPC $$vpc (Route Tables: $$rtb)..."; \
+	$(call wait-stack-idle,$(REPORTS_STACK)); \
+	$(AWS) cloudformation deploy \
+		--stack-name $(REPORTS_STACK) \
+		--template-file infra/reports.yml \
+		--capabilities CAPABILITY_NAMED_IAM \
+		--no-fail-on-empty-changeset \
+		$(STACK_TAGS) \
+		--parameter-overrides \
+			ProjectName=$(PROJECT_NAME) \
+			VpcId=$$vpc \
+			RouteTableIds=$$rtb \
+			SubnetIds=$$subnets \
+			SecurityGroupIds=$$ecs_sg \
+			ImageUri="$$repo:latest" \
+			DatabaseUrl="$$db_url" \
+			DomainName="$${DOMAIN_NAME:-spry.org.ua}" \
+			SenderEmail="$${SENDER_EMAIL:-reports@$${DOMAIN_NAME:-spry.org.ua}}" \
+			RecipientEmail="$${RECIPIENT_EMAIL:-pasiura.pn@ucu.edu.ua}"
+	@echo "=== Reports Stack Outputs ==="
+	@echo "Reports S3 Bucket:       $$($(call stack-output,$(REPORTS_STACK),ReportsBucketName))"
+	@echo "Reports Bucket ARN:      $$($(call stack-output,$(REPORTS_STACK),ReportsBucketArn))"
+	@echo "S3 VPC Endpoint ID:      $$($(call stack-output,$(REPORTS_STACK),S3EndpointId))"
+	@echo "Report Requests Queue:   $$($(call stack-output,$(REPORTS_STACK),ReportRequestsQueueUrl))"
+	@echo "Queue ARN:               $$($(call stack-output,$(REPORTS_STACK),ReportRequestsQueueArn))"
+	@echo "Report Builder Function: $$($(call stack-output,$(REPORTS_STACK),ReportBuilderFunctionName))"
+	@echo "Function ARN:            $$($(call stack-output,$(REPORTS_STACK),ReportBuilderFunctionArn))"
+	@echo "Weekly Schedule ARN:     $$($(call stack-output,$(REPORTS_STACK),WeeklyReportScheduleArn))"
+	@echo "SES Domain Identity:     $$($(call stack-output,$(REPORTS_STACK),DomainIdentityName))"
+	@echo "DKIM Tokens:             $$($(call stack-output,$(REPORTS_STACK),DkimTokens))"
+	@echo "DKIM CNAME 1:            $$($(call stack-output,$(REPORTS_STACK),DkimDNSTokenName1)) -> $$($(call stack-output,$(REPORTS_STACK),DkimDNSTokenValue1))"
+	@echo "DKIM CNAME 2:            $$($(call stack-output,$(REPORTS_STACK),DkimDNSTokenName2)) -> $$($(call stack-output,$(REPORTS_STACK),DkimDNSTokenValue2))"
+	@echo "DKIM CNAME 3:            $$($(call stack-output,$(REPORTS_STACK),DkimDNSTokenName3)) -> $$($(call stack-output,$(REPORTS_STACK),DkimDNSTokenValue3))"
+
+WEEK ?= 2026-W39
+report-now: ## Send on-demand report request to SQS queue (e.g. make report-now WEEK=2026-W39)
+	$(require-aws-credentials)
+	@queue_url=$$($(call stack-output,$(REPORTS_STACK),ReportRequestsQueueUrl) 2>/dev/null | tr -d '[:space:]'); \
+	test -n "$$queue_url" -a "$$queue_url" != "None" || { echo "ERROR: ReportRequestsQueueUrl not found in stack $(REPORTS_STACK). Run 'make deploy-reports' first."; exit 1; }; \
+	payload='{"week": "$(WEEK)", "source": "on-demand"}'; \
+	echo "Sending on-demand report request for $(WEEK) to SQS queue: $$queue_url"; \
+	echo "Payload: $$payload"; \
+	$(AWS) sqs send-message --queue-url "$$queue_url" --message-body "$$payload"; \
+	echo "Report request queued successfully via SQS!"
 
 teardown: ## Fully delete all AWS resources (ALB, ECS, ECR, S3, CloudFront) to prevent charges
 	$(require-aws-credentials)

@@ -1,5 +1,8 @@
 #!/bin/sh
 set -e
+if [ -n "$AWS_LAMBDA_RUNTIME_API" ]; then
+    exec /usr/local/bin/python -m awslambdaric "$@"
+fi
 
 echo "Running database migrations..."
 alembic upgrade head

@@ -36,6 +36,7 @@ $FrontendStack = "$ProjectName-frontend"
 $EcsStack = "$ProjectName-ecs"
 $ServiceStack = "$ProjectName-service"
 $AuthStack = "$ProjectName-auth"
+$ReportsStack = "$ProjectName-reports"
 
 function Invoke-AwsCli {
     param([string[]]$CliArgs)
@@ -104,6 +105,8 @@ switch ($Command.ToLower()) {
         Write-Host "  deploy-frontend - Build and deploy frontend to S3 and invalidate CloudFront"
         Write-Host "  aws-deploy-auth - Deploy Cognito User Pool and Google OAuth"
         Write-Host "  aws-auth-env    - Print Cognito environment variables for .env"
+        Write-Host "  deploy-reports  - Deploy S3 reports bucket and S3 VPC Gateway Endpoint"
+        Write-Host "  report-now   - Send on-demand report request to SQS (e.g. .\infra.ps1 report-now 2026-W39)"
         Write-Host "  teardown     - Fully destroy all AWS resources (ALB, ECS, ECR, S3, CloudFront) for 0 charges"
         Write-Host "  infra-down   - Alias for teardown"
         Write-Host "  aws-status   - Display status and outputs of AWS stacks"
@@ -383,6 +386,147 @@ switch ($Command.ToLower()) {
         Write-Host "==========================================================" -ForegroundColor Green
     }
 
+    "deploy-reports" {
+        Assert-AwsCredentials
+        Write-Host "=== Deploying Reports Infrastructure Stack ($ReportsStack) ===" -ForegroundColor Cyan
+        Wait-StackIdle -StackName $ReportsStack
+
+        $vpc = (Invoke-AwsCli @("ec2", "describe-vpcs", "--filters", "Name=isDefault,Values=true",
+            "--query", "Vpcs[0].VpcId", "--output", "text")).Trim()
+        if (-not $vpc -or $vpc -eq "None") {
+            $vpc = (Invoke-AwsCli @("ec2", "describe-vpcs", "--query", "Vpcs[0].VpcId", "--output", "text")).Trim()
+        }
+        if (-not $vpc -or $vpc -eq "None") {
+            Write-Host "ERROR: No VPC found in $AwsRegion" -ForegroundColor Red
+            exit 1
+        }
+
+        $rtbRaw = Invoke-AwsCli @("ec2", "describe-route-tables", "--filters", "Name=vpc-id,Values=$vpc",
+            "--query", "RouteTables[].RouteTableId", "--output", "text")
+        $routeTables = ($rtbRaw -split '\s+' | Where-Object { $_ }) -join ","
+
+        if (-not $routeTables) {
+            Write-Host "ERROR: No Route Tables found for VPC $vpc in $AwsRegion" -ForegroundColor Red
+            exit 1
+        }
+
+        $subnetsRaw = Invoke-AwsCli @("ec2", "describe-subnets", "--filters", "Name=vpc-id,Values=$vpc",
+            "--query", "Subnets[?MapPublicIpOnLaunch==`true`].SubnetId", "--output", "text")
+        if (-not $subnetsRaw) {
+            $subnetsRaw = Invoke-AwsCli @("ec2", "describe-subnets", "--filters", "Name=vpc-id,Values=$vpc",
+                "--query", "Subnets[].SubnetId", "--output", "text")
+        }
+        $subnets = ($subnetsRaw -split '\s+' | Where-Object { $_ }) -join ","
+
+        $bRepo = Get-StackOutput -StackName $EcrStack -OutputKey "BackendRepositoryUri"
+        $ecsSg = Get-StackOutput -StackName $EcsStack -OutputKey "EcsSecurityGroupId"
+
+        $dbUrl = if ($env:AWS_DATABASE_URL) { $env:AWS_DATABASE_URL } else { "sqlite:////tmp/meetings.db" }
+
+        Write-Host "Target VPC:            $vpc" -ForegroundColor Cyan
+        Write-Host "Target Route Tables:   $routeTables" -ForegroundColor Cyan
+        Write-Host "Target Subnets:        $subnets" -ForegroundColor Cyan
+        Write-Host "Security Group:        $ecsSg" -ForegroundColor Cyan
+        Write-Host "Backend Image URI:     $bRepo`:latest" -ForegroundColor Cyan
+
+        $domainName = if ($env:DOMAIN_NAME) { $env:DOMAIN_NAME } else { "spry.org.ua" }
+        $senderEmail = if ($env:SENDER_EMAIL) { $env:SENDER_EMAIL } else { "reports@$domainName" }
+        $recipientEmail = if ($env:RECIPIENT_EMAIL) { $env:RECIPIENT_EMAIL } else { "pasiura.pn@ucu.edu.ua" }
+
+        $deployArgs = @(
+            "cloudformation", "deploy",
+            "--stack-name", $ReportsStack,
+            "--template-file", "infra/reports.yml",
+            "--capabilities", "CAPABILITY_NAMED_IAM",
+            "--no-fail-on-empty-changeset",
+            "--tags", "PROJECT_NAME=$ProjectName",
+            "--parameter-overrides",
+            "ProjectName=$ProjectName",
+            "VpcId=$vpc",
+            "RouteTableIds=$routeTables",
+            "SubnetIds=$subnets",
+            "SecurityGroupIds=$ecsSg",
+            "ImageUri=$bRepo`:latest",
+            "DatabaseUrl=$dbUrl",
+            "DomainName=$domainName",
+            "SenderEmail=$senderEmail",
+            "RecipientEmail=$recipientEmail"
+        )
+
+        Invoke-AwsCli $deployArgs
+        Wait-StackIdle -StackName $ReportsStack
+
+        Write-Host "=== Reports Stack Outputs ===" -ForegroundColor Green
+        $bucketName = Get-StackOutput -StackName $ReportsStack -OutputKey "ReportsBucketName"
+        $bucketArn = Get-StackOutput -StackName $ReportsStack -OutputKey "ReportsBucketArn"
+        $endpointId = Get-StackOutput -StackName $ReportsStack -OutputKey "S3EndpointId"
+        $functionName = Get-StackOutput -StackName $ReportsStack -OutputKey "ReportBuilderFunctionName"
+        $functionArn = Get-StackOutput -StackName $ReportsStack -OutputKey "ReportBuilderFunctionArn"
+        $queueUrl = Get-StackOutput -StackName $ReportsStack -OutputKey "ReportRequestsQueueUrl"
+        $queueArn = Get-StackOutput -StackName $ReportsStack -OutputKey "ReportRequestsQueueArn"
+        $scheduleArn = Get-StackOutput -StackName $ReportsStack -OutputKey "WeeklyReportScheduleArn"
+
+        $mailerName = Get-StackOutput -StackName $ReportsStack -OutputKey "ReportMailerFunctionName"
+        $mailerArn = Get-StackOutput -StackName $ReportsStack -OutputKey "ReportMailerFunctionArn"
+
+        $domainIdentity = Get-StackOutput -StackName $ReportsStack -OutputKey "DomainIdentityName"
+        $dkimTokens = Get-StackOutput -StackName $ReportsStack -OutputKey "DkimTokens"
+        $token1Name = Get-StackOutput -StackName $ReportsStack -OutputKey "DkimDNSTokenName1"
+        $token1Val = Get-StackOutput -StackName $ReportsStack -OutputKey "DkimDNSTokenValue1"
+        $token2Name = Get-StackOutput -StackName $ReportsStack -OutputKey "DkimDNSTokenName2"
+        $token2Val = Get-StackOutput -StackName $ReportsStack -OutputKey "DkimDNSTokenValue2"
+        $token3Name = Get-StackOutput -StackName $ReportsStack -OutputKey "DkimDNSTokenName3"
+        $token3Val = Get-StackOutput -StackName $ReportsStack -OutputKey "DkimDNSTokenValue3"
+
+        foreach ($fn in @($functionName, $mailerName)) {
+            if ($fn -and $fn -ne "None") {
+                try {
+                    Write-Host "Syncing Lambda code for $fn to $bRepo`:latest..." -ForegroundColor Cyan
+                    $null = Invoke-AwsCli @("lambda", "update-function-code", "--function-name", $fn, "--image-uri", "$bRepo`:latest")
+                    $null = Invoke-AwsCli @("lambda", "wait", "function-updated", "--function-name", $fn)
+                } catch {}
+            }
+        }
+
+        Write-Host "Reports S3 Bucket:       $bucketName" -ForegroundColor Cyan
+        Write-Host "Reports Bucket ARN:      $bucketArn" -ForegroundColor Cyan
+        Write-Host "S3 VPC Endpoint ID:      $endpointId" -ForegroundColor Cyan
+        Write-Host "Report Requests Queue:   $queueUrl" -ForegroundColor Cyan
+        Write-Host "Queue ARN:               $queueArn" -ForegroundColor Cyan
+        Write-Host "Report Builder Function: $functionName" -ForegroundColor Cyan
+        Write-Host "Builder Function ARN:    $functionArn" -ForegroundColor Cyan
+        Write-Host "Report Mailer Function:  $mailerName" -ForegroundColor Cyan
+        Write-Host "Mailer Function ARN:     $mailerArn" -ForegroundColor Cyan
+        Write-Host "Weekly Schedule ARN:     $scheduleArn" -ForegroundColor Cyan
+        Write-Host "SES Domain Identity:     $domainIdentity" -ForegroundColor Cyan
+        Write-Host "DKIM Tokens:             $dkimTokens" -ForegroundColor Cyan
+        Write-Host "==========================================================" -ForegroundColor Yellow
+        Write-Host "DKIM CNAME Records for Domain Verification ($domainName):" -ForegroundColor Yellow
+        Write-Host "  1. Name:  $token1Name" -ForegroundColor Yellow
+        Write-Host "     Value: $token1Val" -ForegroundColor Yellow
+        Write-Host "  2. Name:  $token2Name" -ForegroundColor Yellow
+        Write-Host "     Value: $token2Val" -ForegroundColor Yellow
+        Write-Host "  3. Name:  $token3Name" -ForegroundColor Yellow
+        Write-Host "     Value: $token3Val" -ForegroundColor Yellow
+        Write-Host "==========================================================" -ForegroundColor Yellow
+        Write-Host "Reports infrastructure deployed successfully!" -ForegroundColor Green
+        Write-Host "==========================================================" -ForegroundColor Green
+    }
+
+    "report-now" {
+        Assert-AwsCredentials
+        $targetWeek = if ($Arg1) { $Arg1 } elseif ($env:WEEK) { $env:WEEK } else { "2026-W39" }
+        $queueUrl = Get-StackOutput -StackName $ReportsStack -OutputKey "ReportRequestsQueueUrl"
+        if (-not $queueUrl -or $queueUrl -eq "None") {
+            Write-Host "ERROR: ReportRequestsQueueUrl not found in stack $ReportsStack. Run 'deploy-reports' first." -ForegroundColor Red
+            exit 1
+        }
+        $payload = '{\"week\": \"' + $targetWeek + '\", \"source\": \"on-demand\"}'
+        Write-Host "Sending report request for $targetWeek to SQS queue: $queueUrl" -ForegroundColor Cyan
+        Invoke-AwsCli @("sqs", "send-message", "--queue-url", $queueUrl, "--message-body", $payload)
+        Write-Host "Report request for week '$targetWeek' queued successfully via SQS!" -ForegroundColor Green
+    }
+
     { $_ -in "teardown", "infra-down" } {
         Assert-AwsCredentials
         Write-Host "WARNING: This will completely destroy all AWS resources for ${ProjectName}:" -ForegroundColor Yellow
@@ -444,13 +588,23 @@ switch ($Command.ToLower()) {
             $null = Invoke-AwsCli @("cloudformation", "wait", "stack-delete-complete", "--stack-name", "$ProjectName-oidc")
         } catch {}
 
-        Write-Host "=== [6/7] Deleting Auth Stack ($AuthStack) ===" -ForegroundColor Cyan
+        Write-Host "=== [6/8] Deleting Auth Stack ($AuthStack) ===" -ForegroundColor Cyan
         try {
             $null = Invoke-AwsCli @("cloudformation", "delete-stack", "--stack-name", $AuthStack)
             $null = Invoke-AwsCli @("cloudformation", "wait", "stack-delete-complete", "--stack-name", $AuthStack)
         } catch {}
 
-        Write-Host "=== [7/7] Cleaning up CloudWatch Logs ===" -ForegroundColor Cyan
+        Write-Host "=== [7/8] Emptying and Deleting Reports Stack ($ReportsStack) ===" -ForegroundColor Cyan
+        $repBucket = Get-StackOutput -StackName $ReportsStack -OutputKey "ReportsBucketName" 2>$null
+        if ($repBucket -and $repBucket -ne "None") {
+            try { $null = Invoke-AwsCli @("s3", "rm", "s3://$repBucket", "--recursive") } catch {}
+        }
+        try {
+            $null = Invoke-AwsCli @("cloudformation", "delete-stack", "--stack-name", $ReportsStack)
+            $null = Invoke-AwsCli @("cloudformation", "wait", "stack-delete-complete", "--stack-name", $ReportsStack)
+        } catch {}
+
+        Write-Host "=== [8/8] Cleaning up CloudWatch Logs ===" -ForegroundColor Cyan
         try {
             $null = Invoke-AwsCli @("logs", "delete-log-group", "--log-group-name", "/ecs/$ProjectName-backend")
         } catch {}
@@ -463,7 +617,7 @@ switch ($Command.ToLower()) {
 
     "aws-status" {
         Assert-AwsCredentials
-        foreach ($stack in @($EcrStack, $FrontendStack, $EcsStack, $ServiceStack, $AuthStack)) {
+        foreach ($stack in @($EcrStack, $FrontendStack, $EcsStack, $ServiceStack, $AuthStack, $ReportsStack)) {
             Write-Host "=== Stack: $stack ===" -ForegroundColor Cyan
             $status = (Invoke-AwsCli @("cloudformation", "describe-stacks", "--stack-name", $stack,
                 "--query", "Stacks[0].StackStatus", "--output", "text") 2>$null)
