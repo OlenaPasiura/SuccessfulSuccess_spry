@@ -6,7 +6,10 @@ param(
     [string]$Command = "help",
 
     [Parameter(Position=1)]
-    [string]$Arg1
+    [string]$Arg1,
+
+    [Parameter(ValueFromRemainingArguments=$true)]
+    [string[]]$RemainingArgs
 )
 
 $ErrorActionPreference = "Continue"
@@ -20,7 +23,7 @@ if (Test-Path $EnvFile) {
             $parts = $line.Split("=", 2)
             $k = $parts[0].Trim()
             $v = $parts[1].Trim().Trim('"').Trim("'")
-            if (-not [string]::IsNullOrEmpty($k)) {
+            if (-not [string]::IsNullOrEmpty($k) -and -not [string]::IsNullOrEmpty($v)) {
                 [Environment]::SetEnvironmentVariable($k, $v, "Process")
             }
         }
@@ -30,6 +33,8 @@ if (Test-Path $EnvFile) {
 $ProjectName = if ($env:PROJECT_NAME) { $env:PROJECT_NAME } else { "successfulsuccess" }
 $AwsRegion = if ($env:AWS_REGION) { $env:AWS_REGION } else { "us-east-1" }
 $ImageTag = if ($env:IMAGE_TAG) { $env:IMAGE_TAG } else { "latest" }
+[Environment]::SetEnvironmentVariable("AWS_DEFAULT_REGION", $AwsRegion, "Process")
+[Environment]::SetEnvironmentVariable("AWS_REGION", $AwsRegion, "Process")
 
 $EcrStack = "$ProjectName-ecr"
 $FrontendStack = "$ProjectName-frontend"
@@ -37,6 +42,8 @@ $EcsStack = "$ProjectName-ecs"
 $ServiceStack = "$ProjectName-service"
 $AuthStack = "$ProjectName-auth"
 $ReportsStack = "$ProjectName-reports"
+$AiStack = "$ProjectName-ai"
+$ParserModel = if ($env:PARSER_MODEL) { $env:PARSER_MODEL } else { "us.anthropic.claude-sonnet-4-6" }
 
 function Invoke-AwsCli {
     param([string[]]$CliArgs)
@@ -44,28 +51,34 @@ function Invoke-AwsCli {
     $awsCmd = Get-Command "aws" -ErrorAction SilentlyContinue
     if ($awsCmd) {
         & aws @CliArgs
-    } else {
-        $workDir = if ($PSScriptRoot) { $PSScriptRoot } else { (Get-Location).Path }
-        $dockerArgs = @(
-            "run", "--rm",
-            "-e", "AWS_ACCESS_KEY_ID=$($env:AWS_ACCESS_KEY_ID)",
-            "-e", "AWS_SECRET_ACCESS_KEY=$($env:AWS_SECRET_ACCESS_KEY)",
-            "-e", "AWS_SESSION_TOKEN=$($env:AWS_SESSION_TOKEN)",
-            "-e", "AWS_DEFAULT_REGION=$AwsRegion",
-            "-e", "AWS_REGION=$AwsRegion",
-            "-v", "${workDir}:/aws",
-            "-w", "/aws",
-            "amazon/aws-cli:latest"
-        ) + $CliArgs
-        & docker @dockerArgs
+        return
     }
+    $pyAws = & python -c "import importlib.util; print(1 if importlib.util.find_spec('awscli') else 0)" 2>$null
+    if ($pyAws -eq "1") {
+        & python -c "import sys, awscli.clidriver; sys.exit(awscli.clidriver.main())" @CliArgs
+        return
+    }
+    $workDir = if ($PSScriptRoot) { $PSScriptRoot } else { (Get-Location).Path }
+    $dockerArgs = @(
+        "run", "--rm",
+        "-e", "AWS_ACCESS_KEY_ID=$($env:AWS_ACCESS_KEY_ID)",
+        "-e", "AWS_SECRET_ACCESS_KEY=$($env:AWS_SECRET_ACCESS_KEY)",
+        "-e", "AWS_SESSION_TOKEN=$($env:AWS_SESSION_TOKEN)",
+        "-e", "AWS_DEFAULT_REGION=$AwsRegion",
+        "-e", "AWS_REGION=$AwsRegion",
+        "-v", "${workDir}:/aws",
+        "-w", "/aws",
+        "amazon/aws-cli:latest"
+    ) + $CliArgs
+    & docker @dockerArgs
 }
 
 function Get-StackOutput {
     param([string]$StackName, [string]$OutputKey)
     $val = Invoke-AwsCli @("cloudformation", "describe-stacks", "--stack-name", $StackName,
         "--query", "Stacks[0].Outputs[?OutputKey=='$OutputKey'].OutputValue", "--output", "text") 2>$null
-    return $val.Trim()
+    if ($null -eq $val) { return "" }
+    return ($val | Out-String).Trim()
 }
 
 function Assert-AwsCredentials {
@@ -107,6 +120,9 @@ switch ($Command.ToLower()) {
         Write-Host "  aws-auth-env    - Print Cognito environment variables for .env"
         Write-Host "  deploy-reports  - Deploy S3 reports bucket and S3 VPC Gateway Endpoint"
         Write-Host "  report-now   - Send on-demand report request to SQS (e.g. .\infra.ps1 report-now 2026-W39)"
+        Write-Host "  llm-hello    - Execute the Bedrock LLM hello test script using local AWS credentials"
+        Write-Host "  parse        - Parse meeting agenda text using Bedrock LLM (e.g. .\make.cmd parse TEXT=""..."")"
+        Write-Host "  deploy-ai    - Deploy Agenda Parser Lambda & Function URL stack (infra/ai.yml)"
         Write-Host "  teardown     - Fully destroy all AWS resources (ALB, ECS, ECR, S3, CloudFront) for 0 charges"
         Write-Host "  infra-down   - Alias for teardown"
         Write-Host "  aws-status   - Display status and outputs of AWS stacks"
@@ -326,6 +342,8 @@ switch ($Command.ToLower()) {
         Write-Host "=== [2/2] Updating Static Files in S3 + Invalidating CloudFront Cache ===" -ForegroundColor Cyan
         Write-Host "Building frontend static assets with VITE_API_URL=$albUrl..." -ForegroundColor Cyan
         $siteUrlFormatted = if ($siteUrl.EndsWith("/")) { $siteUrl } else { "$siteUrl/" }
+        $aiUrl = Get-StackOutput -StackName $AiStack -OutputKey "AgendaParserFunctionUrl"
+        if (-not $aiUrl -or $aiUrl -eq "None") { $aiUrl = $env:VITE_AGENDA_PARSER_URL }
         docker build `
             --build-arg "VITE_API_URL=$albUrl" `
             --build-arg "VITE_COGNITO_REGION=$AwsRegion" `
@@ -333,6 +351,7 @@ switch ($Command.ToLower()) {
             --build-arg "VITE_COGNITO_CLIENT_ID=$($env:VITE_COGNITO_CLIENT_ID)" `
             --build-arg "VITE_COGNITO_DOMAIN=$($env:VITE_COGNITO_DOMAIN)" `
             --build-arg "VITE_COGNITO_REDIRECT_URI=$siteUrlFormatted" `
+            --build-arg "VITE_AGENDA_PARSER_URL=$aiUrl" `
             --target export --output type=local,dest=frontend/dist -f frontend/Dockerfile.build ./frontend
 
         Write-Host "Uploading static files to S3 (s3://$bucket)..." -ForegroundColor Cyan
@@ -364,6 +383,8 @@ switch ($Command.ToLower()) {
 
         Write-Host "=== Building frontend static assets for CloudFront ($siteUrl) ===" -ForegroundColor Cyan
         $siteUrlFormatted = if ($siteUrl.EndsWith("/")) { $siteUrl } else { "$siteUrl/" }
+        $aiUrl = Get-StackOutput -StackName $AiStack -OutputKey "AgendaParserFunctionUrl"
+        if (-not $aiUrl -or $aiUrl -eq "None") { $aiUrl = $env:VITE_AGENDA_PARSER_URL }
         docker build `
             --build-arg "VITE_API_URL=$albUrl" `
             --build-arg "VITE_COGNITO_REGION=$AwsRegion" `
@@ -371,6 +392,7 @@ switch ($Command.ToLower()) {
             --build-arg "VITE_COGNITO_CLIENT_ID=$($env:VITE_COGNITO_CLIENT_ID)" `
             --build-arg "VITE_COGNITO_DOMAIN=$($env:VITE_COGNITO_DOMAIN)" `
             --build-arg "VITE_COGNITO_REDIRECT_URI=$siteUrlFormatted" `
+            --build-arg "VITE_AGENDA_PARSER_URL=$aiUrl" `
             --target export --output type=local,dest=frontend/dist -f frontend/Dockerfile.build ./frontend
 
         Write-Host "Uploading static files to S3 (s3://$bucket)..." -ForegroundColor Cyan
@@ -525,6 +547,93 @@ switch ($Command.ToLower()) {
         Write-Host "Sending report request for $targetWeek to SQS queue: $queueUrl" -ForegroundColor Cyan
         Invoke-AwsCli @("sqs", "send-message", "--queue-url", $queueUrl, "--message-body", $payload)
         Write-Host "Report request for week '$targetWeek' queued successfully via SQS!" -ForegroundColor Green
+    }
+
+    "llm-hello" {
+        python backend/app/ai/hello.py
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    }
+
+    "parse" {
+        $allArgs = @()
+        if ($Arg1) { $allArgs += $Arg1 }
+        if ($RemainingArgs) { $allArgs += $RemainingArgs }
+        $joined = ($allArgs -join " ").Trim()
+        if ($joined.StartsWith("TEXT=")) {
+            $joined = $joined.Substring(5).Trim().Trim('"').Trim("'")
+        }
+        if ($joined) {
+            $env:TEXT = $joined
+        }
+        python backend/app/ai/agenda.py
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    }
+
+    { $_ -in "deploy-ai", "aws-deploy-ai" } {
+        Assert-AwsCredentials
+        Write-Host "=== Deploying AI Agenda Parser Stack ($AiStack) ===" -ForegroundColor Cyan
+        Wait-StackIdle -StackName $AiStack
+
+        $bRepo = Get-StackOutput -StackName $EcrStack -OutputKey "BackendRepositoryUri"
+        if (-not $bRepo -or $bRepo -eq "None") {
+            Write-Host "ERROR: Backend ECR repository not found. Run 'aws-init' and 'build-push' first." -ForegroundColor Red
+            exit 1
+        }
+
+        $poolId = Get-StackOutput -StackName $AuthStack -OutputKey "UserPoolId"
+        if (-not $poolId -or $poolId -eq "None") {
+            $poolId = if ($env:COGNITO_USER_POOL_ID) { $env:COGNITO_USER_POOL_ID } else { $env:VITE_COGNITO_USER_POOL_ID }
+        }
+        $clientId = Get-StackOutput -StackName $AuthStack -OutputKey "UserPoolClientId"
+        if (-not $clientId -or $clientId -eq "None") {
+            $clientId = if ($env:COGNITO_CLIENT_ID) { $env:COGNITO_CLIENT_ID } else { $env:VITE_COGNITO_CLIENT_ID }
+        }
+
+        $siteUrl = Get-StackOutput -StackName $FrontendStack -OutputKey "SiteUrl"
+        $corsList = @("http://localhost:5173", "http://localhost:3000")
+        if ($siteUrl -and $siteUrl -ne "None") {
+            $siteClean = $siteUrl.TrimEnd("/")
+            if ($corsList -notcontains $siteClean) {
+                $corsList += $siteClean
+            }
+        }
+        $corsOrigins = $corsList -join ","
+
+        $deployArgs = @(
+            "cloudformation", "deploy",
+            "--stack-name", $AiStack,
+            "--template-file", "infra/ai.yml",
+            "--capabilities", "CAPABILITY_NAMED_IAM",
+            "--no-fail-on-empty-changeset",
+            "--tags", "PROJECT_NAME=$ProjectName",
+            "--parameter-overrides",
+            "ProjectName=$ProjectName",
+            "ImageUri=$bRepo`:latest",
+            "CognitoUserPoolId=$poolId",
+            "CognitoClientId=$clientId",
+            "ParserModel=$ParserModel",
+            "CorsOrigins=$corsOrigins"
+        )
+
+        Invoke-AwsCli $deployArgs
+        Wait-StackIdle -StackName $AiStack
+
+        $fnName = Get-StackOutput -StackName $AiStack -OutputKey "AgendaParserFunctionName"
+        $fnArn = Get-StackOutput -StackName $AiStack -OutputKey "AgendaParserFunctionArn"
+        $fnUrl = Get-StackOutput -StackName $AiStack -OutputKey "AgendaParserFunctionUrl"
+
+        if ($fnName -and $fnName -ne "None") {
+            try {
+                Write-Host "Syncing Lambda code for $fnName to $bRepo`:latest..." -ForegroundColor Cyan
+                $null = Invoke-AwsCli @("lambda", "update-function-code", "--function-name", $fnName, "--image-uri", "$bRepo`:latest")
+                $null = Invoke-AwsCli @("lambda", "wait", "function-updated", "--function-name", $fnName)
+            } catch {}
+        }
+
+        Write-Host "=== AI Stack Outputs ===" -ForegroundColor Green
+        Write-Host "Agenda Parser Function Name: $fnName" -ForegroundColor Cyan
+        Write-Host "Agenda Parser Function ARN:  $fnArn" -ForegroundColor Cyan
+        Write-Host "Agenda Parser Function URL:  $fnUrl" -ForegroundColor Yellow
     }
 
     { $_ -in "teardown", "infra-down" } {

@@ -19,3 +19,16 @@ def create_meeting(db: Session, meeting_in: MeetingCreate) -> Meeting:
     db.commit()
     db.refresh(meeting)
     return meeting
+
+
+def update_meeting(db: Session, meeting_id: int, meeting_in: MeetingCreate) -> Meeting | None:
+    meeting = db.query(Meeting).filter(Meeting.id == meeting_id).first()
+    if meeting is None:
+        return None
+    meeting.title = meeting_in.title
+    meeting.starts_at = meeting_in.starts_at
+    meeting.ends_at = meeting_in.ends_at
+    meeting.attendee_count = meeting_in.attendee_count
+    db.commit()
+    db.refresh(meeting)
+    return meeting

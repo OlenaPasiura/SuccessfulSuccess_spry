@@ -17,8 +17,10 @@ endif
 PROJECT_NAME ?= successfulsuccess
 AWS_REGION ?= us-east-1
 IMAGE_TAG ?= latest
+PARSER_MODEL ?= us.anthropic.claude-sonnet-4-6
+TEXT ?=
 
-export AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_REGION PROJECT_NAME
+export AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_REGION PROJECT_NAME PARSER_MODEL TEXT
 export MSYS_NO_PATHCONV := 1
 export MSYS2_ARG_CONV_EXCL := *
 
@@ -40,6 +42,7 @@ SERVICE_STACK ?= $(PROJECT_NAME)-service
 OIDC_STACK ?= $(PROJECT_NAME)-oidc
 AUTH_STACK ?= $(PROJECT_NAME)-auth
 REPORTS_STACK ?= $(PROJECT_NAME)-reports
+AI_STACK ?= $(PROJECT_NAME)-ai
 
 STACK_TAGS = --tags "PROJECT_NAME=$(PROJECT_NAME)"
 
@@ -65,7 +68,8 @@ endef
 
 .PHONY: help up up-build down down-v logs ps migrate test lint fmt \
         aws-whoami aws-init infra-up build-push deploy teardown infra-down \
-        aws-status aws-logs aws-url deploy-reports report-now
+        aws-status aws-logs aws-url deploy-reports report-now llm-hello parse \
+        deploy-ai aws-deploy-ai
 
 help: ## Show this help message
 	@grep -hE '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-20s\033[0m %s\n", $$1, $$2}'
@@ -234,6 +238,8 @@ deploy: ## Deploy/update ECS Fargate service and update static files in S3 + Clo
 			"DatabaseUrl=$(or $(AWS_DATABASE_URL),sqlite:////app/meetings.db)" || exit 1; \
 	$(AWS) ecs update-service --cluster "$$cluster" --service "$(PROJECT_NAME)-backend-service" --force-new-deployment >/dev/null 2>&1 || true; \
 	echo "=== [2/2] Updating Static Files in S3 + Invalidating CloudFront Cache ==="; \
+	ai_url=$$($(call stack-output,$(AI_STACK),AgendaParserFunctionUrl) 2>/dev/null | tr -d '[:space:]'); \
+	if [ -z "$$ai_url" ] || [ "$$ai_url" = "None" ]; then ai_url="$(VITE_AGENDA_PARSER_URL)"; fi; \
 	echo "Building frontend static assets with VITE_API_URL=$$alb_url..."; \
 	docker build \
 		--build-arg "VITE_API_URL=$$alb_url" \
@@ -242,6 +248,7 @@ deploy: ## Deploy/update ECS Fargate service and update static files in S3 + Clo
 		--build-arg "VITE_COGNITO_CLIENT_ID=$(VITE_COGNITO_CLIENT_ID)" \
 		--build-arg "VITE_COGNITO_DOMAIN=$(VITE_COGNITO_DOMAIN)" \
 		--build-arg "VITE_COGNITO_REDIRECT_URI=$$site_url/" \
+		--build-arg "VITE_AGENDA_PARSER_URL=$$ai_url" \
 		--target export --output type=local,dest=frontend/dist -f frontend/Dockerfile.build ./frontend || exit 1; \
 	echo "Uploading static files to S3 (s3://$$bucket)..."; \
 	$(AWS) s3 sync frontend/dist "s3://$$bucket" --delete --exclude "*.html" \
@@ -265,6 +272,8 @@ deploy-frontend: ## Build and deploy frontend static files to S3 + invalidate Cl
 	site_url=$$($(call stack-output,$(FRONTEND_STACK),SiteUrl) 2>/dev/null | tr -d '[:space:]'); \
 	alb_url=$$($(call stack-output,$(ECS_STACK),AlbUrl) 2>/dev/null | tr -d '[:space:]'); \
 	test -n "$$bucket" -a "$$bucket" != "None" || { echo "ERROR: Frontend stack not found. Run 'make aws-init' first."; exit 1; }; \
+	ai_url=$$($(call stack-output,$(AI_STACK),AgendaParserFunctionUrl) 2>/dev/null | tr -d '[:space:]'); \
+	if [ -z "$$ai_url" ] || [ "$$ai_url" = "None" ]; then ai_url="$(VITE_AGENDA_PARSER_URL)"; fi; \
 	echo "=== Building frontend static assets for CloudFront ($$site_url) ==="; \
 	docker build \
 		--build-arg "VITE_API_URL=$$alb_url" \
@@ -273,6 +282,7 @@ deploy-frontend: ## Build and deploy frontend static files to S3 + invalidate Cl
 		--build-arg "VITE_COGNITO_CLIENT_ID=$(VITE_COGNITO_CLIENT_ID)" \
 		--build-arg "VITE_COGNITO_DOMAIN=$(VITE_COGNITO_DOMAIN)" \
 		--build-arg "VITE_COGNITO_REDIRECT_URI=$$site_url/" \
+		--build-arg "VITE_AGENDA_PARSER_URL=$$ai_url" \
 		--target export --output type=local,dest=frontend/dist -f frontend/Dockerfile.build ./frontend || exit 1; \
 	echo "Uploading static files to S3 (s3://$$bucket)..."; \
 	$(AWS) s3 sync frontend/dist "s3://$$bucket" --delete --exclude "*.html" \
@@ -379,6 +389,75 @@ report-now: ## Send on-demand report request to SQS queue (e.g. make report-now 
 	echo "Payload: $$payload"; \
 	$(AWS) sqs send-message --queue-url "$$queue_url" --message-body "$$payload"; \
 	echo "Report request queued successfully via SQS!"
+
+llm-hello: ## Run LLM Bedrock test script using local AWS credentials
+	@if python -c "import anthropic" >/dev/null 2>&1; then \
+		python backend/app/ai/hello.py; \
+	elif python3 -c "import anthropic" >/dev/null 2>&1; then \
+		python3 backend/app/ai/hello.py; \
+	else \
+		docker build -q -t backend:llm ./backend >/dev/null && \
+		docker run --rm \
+			-e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY -e AWS_SESSION_TOKEN \
+			-e AWS_DEFAULT_REGION=$(AWS_REGION) -e AWS_REGION=$(AWS_REGION) \
+			-e PARSER_MODEL=$(PARSER_MODEL) \
+			-v "$$HOME/.aws:/root/.aws:ro" \
+			--entrypoint python backend:llm -m app.ai.hello; \
+	fi
+
+parse: ## Parse meeting agenda text with Bedrock LLM (e.g. make parse TEXT="...")
+	@if python -c "import anthropic" >/dev/null 2>&1; then \
+		python backend/app/ai/agenda.py; \
+	elif python3 -c "import anthropic" >/dev/null 2>&1; then \
+		python3 backend/app/ai/agenda.py; \
+	else \
+		docker build -q -t backend:llm ./backend >/dev/null && \
+		docker run --rm \
+			-e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY -e AWS_SESSION_TOKEN \
+			-e AWS_DEFAULT_REGION=$(AWS_REGION) -e AWS_REGION=$(AWS_REGION) \
+			-e PARSER_MODEL=$(PARSER_MODEL) -e TEXT \
+			-v "$$HOME/.aws:/root/.aws:ro" \
+			--entrypoint python backend:llm -m app.ai.agenda; \
+	fi
+
+deploy-ai: ## Deploy Agenda Parser Lambda & Function URL stack (infra/ai.yml)
+	$(require-aws-credentials)
+	@echo "=== Deploying AI Agenda Parser Stack ($(AI_STACK)) ==="
+	@repo=$$($(call stack-output,$(ECR_STACK),BackendRepositoryUri) 2>/dev/null | tr -d '[:space:]'); \
+	test -n "$$repo" -a "$$repo" != "None" || { echo "ERROR: Backend ECR repo not found. Run 'make aws-init' and 'make build-push' first."; exit 1; }; \
+	pool_id=$$($(call stack-output,$(AUTH_STACK),UserPoolId) 2>/dev/null | tr -d '[:space:]'); \
+	if [ -z "$$pool_id" ] || [ "$$pool_id" = "None" ]; then pool_id="$(or $(COGNITO_USER_POOL_ID),$(VITE_COGNITO_USER_POOL_ID))"; fi; \
+	client_id=$$($(call stack-output,$(AUTH_STACK),UserPoolClientId) 2>/dev/null | tr -d '[:space:]'); \
+	if [ -z "$$client_id" ] || [ "$$client_id" = "None" ]; then client_id="$(or $(COGNITO_CLIENT_ID),$(VITE_COGNITO_CLIENT_ID))"; fi; \
+	site_url=$$($(call stack-output,$(FRONTEND_STACK),SiteUrl) 2>/dev/null | tr -d '[:space:]'); \
+	cors_origins="http://localhost:5173,http://localhost:3000"; \
+	if [ -n "$$site_url" ] && [ "$$site_url" != "None" ]; then cors_origins="$$cors_origins,$$site_url"; fi; \
+	$(call wait-stack-idle,$(AI_STACK)); \
+	$(AWS) cloudformation deploy \
+		--stack-name $(AI_STACK) \
+		--template-file infra/ai.yml \
+		--capabilities CAPABILITY_NAMED_IAM \
+		--no-fail-on-empty-changeset \
+		$(STACK_TAGS) \
+		--parameter-overrides \
+			ProjectName=$(PROJECT_NAME) \
+			ImageUri="$$repo:latest" \
+			CognitoUserPoolId="$$pool_id" \
+			CognitoClientId="$$client_id" \
+			ParserModel="$(PARSER_MODEL)" \
+			CorsOrigins="$$cors_origins"; \
+	fn_name=$$($(call stack-output,$(AI_STACK),AgendaParserFunctionName) 2>/dev/null | tr -d '[:space:]'); \
+	if [ -n "$$fn_name" ] && [ "$$fn_name" != "None" ]; then \
+		$(AWS) lambda update-function-code --function-name "$$fn_name" --image-uri "$$repo:latest" >/dev/null 2>&1 || true; \
+		$(AWS) lambda wait function-updated --function-name "$$fn_name" >/dev/null 2>&1 || true; \
+	fi
+	@echo "=== AI Stack Outputs ==="
+	@echo "Agenda Parser Function Name: $$($(call stack-output,$(AI_STACK),AgendaParserFunctionName))"
+	@echo "Agenda Parser Function ARN:  $$($(call stack-output,$(AI_STACK),AgendaParserFunctionArn))"
+	@echo "Agenda Parser Function URL:  $$($(call stack-output,$(AI_STACK),AgendaParserFunctionUrl))"
+
+aws-deploy-ai: deploy-ai ## Alias for deploy-ai
+
 
 teardown: ## Fully delete all AWS resources (ALB, ECS, ECR, S3, CloudFront) to prevent charges
 	$(require-aws-credentials)

@@ -2,13 +2,14 @@ import React from 'react';
 import { Meeting } from '@/api/meetings';
 import { Card, CardHeader, CardTitle, CardContent } from './ui/card';
 import { Button } from './ui/button';
-import { Calendar, Clock, Users, AlertCircle, RefreshCw, Loader2 } from 'lucide-react';
+import { Calendar, Clock, Users, AlertCircle, RefreshCw, Loader2, Pencil } from 'lucide-react';
 
 interface MeetingListProps {
   meetings: Meeting[];
   isLoading: boolean;
   error: string | null;
   onRetry: () => void;
+  onEdit?: (meeting: Meeting) => void;
 }
 
 function formatMeetingDateTime(isoString: string): string {
@@ -32,6 +33,7 @@ export const MeetingList: React.FC<MeetingListProps> = ({
   isLoading,
   error,
   onRetry,
+  onEdit,
 }) => {
   return (
     <div className="space-y-4">
@@ -119,7 +121,19 @@ export const MeetingList: React.FC<MeetingListProps> = ({
                   {formatMeetingDateTime(meeting.ends_at)}
                 </span>
               </div>
-              <span className="text-xs text-gray-400 ml-auto font-mono">#{meeting.id}</span>
+              <div className="ml-auto flex items-center gap-3">
+                {onEdit && (
+                  <button
+                    type="button"
+                    onClick={() => onEdit(meeting)}
+                    className="text-xs text-blue-600 hover:text-blue-800 font-medium inline-flex items-center gap-1"
+                  >
+                    <Pencil className="h-3 w-3" />
+                    Edit
+                  </button>
+                )}
+                <span className="text-xs text-gray-400 font-mono">#{meeting.id}</span>
+              </div>
             </CardContent>
           </Card>
         ))}

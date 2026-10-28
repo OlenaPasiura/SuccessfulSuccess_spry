@@ -13,6 +13,7 @@ export const App: React.FC = () => {
   const auth = useAuth();
   const [currentPath, setCurrentPath] = useState<string>(() => window.location.pathname);
   const [meetings, setMeetings] = useState<Meeting[]>([]);
+  const [editingMeeting, setEditingMeeting] = useState<Meeting | null>(null);
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
   const [authErrorDismissed, setAuthErrorDismissed] = useState<boolean>(false);
@@ -161,10 +162,16 @@ export const App: React.FC = () => {
         )}
 
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start">
-          {/* Meeting Creation Form */}
+          {/* Meeting Creation / Editing Form */}
           <div className="lg:col-span-5">
             <div className="sticky top-24">
-              <MeetingForm onMeetingCreated={loadMeetings} token={auth.user?.access_token} />
+              <MeetingForm
+                key={editingMeeting?.id ?? 'new'}
+                onMeetingCreated={loadMeetings}
+                token={auth.user?.id_token || auth.user?.access_token}
+                editingMeeting={editingMeeting}
+                onCancelEdit={() => setEditingMeeting(null)}
+              />
             </div>
           </div>
 
@@ -175,6 +182,7 @@ export const App: React.FC = () => {
               isLoading={isLoading}
               error={error}
               onRetry={loadMeetings}
+              onEdit={(m) => setEditingMeeting(m)}
             />
           </div>
         </div>

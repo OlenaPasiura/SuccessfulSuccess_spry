@@ -149,7 +149,7 @@ def handler(event: dict[str, Any] | None, context: Any = None) -> dict[str, Any]
         csv_bytes = (
             f"Status,RequestedWeek,Message\n"
             f"ERROR,{week},Week is not a valid ISO week (weeks must be 01-53)\n"
-        ).encode("utf-8")
+        ).encode()
 
     bucket_name = os.getenv("REPORTS_BUCKET_NAME")
     if not bucket_name:

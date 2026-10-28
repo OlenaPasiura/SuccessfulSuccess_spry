@@ -111,4 +111,3 @@ def test_mailer_handler_fallback_on_unverified_sender(mock_boto_client):
     # Verify second call used verified sender
     fallback_kwargs = mock_ses.send_email.call_args_list[1].kwargs
     assert fallback_kwargs["FromEmailAddress"] == "test-recipient@example.com"
-

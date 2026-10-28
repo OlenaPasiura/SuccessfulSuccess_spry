@@ -130,12 +130,19 @@ def handler(event: dict[str, Any] | None, context: Any = None) -> dict[str, Any]
     except Exception as exc:
         log.warning(
             f"SES email delivery attempted from {sender_email} but failed: {exc}",
-            extra={"error": str(exc), "sender": sender_email, "recipient": recipient_email, "key": key},
+            extra={
+                "error": str(exc),
+                "sender": sender_email,
+                "recipient": recipient_email,
+                "key": key,
+            },
         )
         # If domain identity is still pending DNS verification, fallback to verified sender
         if verified_fallback and verified_fallback != sender_email:
             try:
-                log.info(f"Retrying email delivery with verified fallback sender: {verified_fallback}")
+                log.info(
+                    f"Retrying email delivery with verified fallback sender: {verified_fallback}"
+                )
                 msg.replace_header("From", verified_fallback)
                 fallback_resp = ses_client.send_email(
                     FromEmailAddress=verified_fallback,
@@ -155,7 +162,11 @@ def handler(event: dict[str, Any] | None, context: Any = None) -> dict[str, Any]
             except Exception as fallback_exc:
                 log.error(
                     f"SES fallback email delivery failed: {fallback_exc}",
-                    extra={"error": str(fallback_exc), "sender": verified_fallback, "recipient": recipient_email},
+                    extra={
+                        "error": str(fallback_exc),
+                        "sender": verified_fallback,
+                        "recipient": recipient_email,
+                    },
                 )
 
     return {
