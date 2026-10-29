@@ -48,9 +48,6 @@ jobs:
         run: ruff check backend/
 
       - name: Run Backend Tests
-        env:
-          PYTHONPATH: backend
-          DATABASE_URL: sqlite:///:memory:
         run: pytest backend/tests/
 
   deploy:
@@ -119,10 +116,3 @@ jobs:
           service: ${{ env.ECS_SERVICE }}
           cluster: ${{ env.ECS_CLUSTER }}
           wait-for-service-stability: true
-
-      - name: Update Lambda functions with latest ECR image
-        run: |
-          IMAGE_LATEST="${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:latest"
-          for fn in successfulsuccess-agenda-parser successfulsuccess-report-builder successfulsuccess-report-mailer; do
-            aws lambda update-function-code --function-name "$fn" --image-uri "$IMAGE_LATEST" || true
-          done
