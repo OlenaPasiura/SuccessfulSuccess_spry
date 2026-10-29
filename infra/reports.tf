@@ -5,6 +5,7 @@
 resource "aws_s3_bucket" "reports" {
   bucket = "${var.project_name}-reports-${data.aws_caller_identity.current.account_id}"
 
+  # Tag used to verify end-to-end VCS-driven Apply in HCP Terraform
   tags = {
     TestApply = "true"
   }

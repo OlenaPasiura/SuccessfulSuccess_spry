@@ -1,4 +1,7 @@
-# Trigger VCS workflow (real change for full Apply)
+# -------------------------------------------------------------------------
+# Input Variables for Auth (Cognito), Reports (S3/SQS/Lambda/SES), and AI
+# -------------------------------------------------------------------------
+
 variable "project_name" {
   description = "Prefix for the names of all AWS resources in this project."
   type        = string
