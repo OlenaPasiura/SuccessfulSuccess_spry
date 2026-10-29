@@ -4,6 +4,10 @@
 
 resource "aws_s3_bucket" "reports" {
   bucket = "${var.project_name}-reports-${data.aws_caller_identity.current.account_id}"
+
+  tags = {
+    TestApply = "true"
+  }
 }
 
 resource "aws_s3_bucket_public_access_block" "reports" {
