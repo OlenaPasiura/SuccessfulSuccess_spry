@@ -1,3 +1,4 @@
+# Trigger VCS workflow
 variable "project_name" {
   description = "Prefix for the names of all AWS resources in this project."
   type        = string
