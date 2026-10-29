@@ -116,13 +116,16 @@ switch ($Command.ToLower()) {
         Write-Host "  build-push   - Build Docker images (linux/amd64), tag and push to ECR"
         Write-Host "  deploy       - Launch/update ECS Fargate (0.25 vCPU / 0.5 GB RAM) + S3 & CloudFront"
         Write-Host "  deploy-frontend - Build and deploy frontend to S3 and invalidate CloudFront"
-        Write-Host "  aws-deploy-auth - Deploy Cognito User Pool and Google OAuth"
+        Write-Host "  tf-init      - Initialize Terraform working directory in infra/"
+        Write-Host "  tf-plan      - Format, validate, and preview Terraform execution plan in infra/"
+        Write-Host "  tf-apply     - Apply Terraform configuration in infra/ (Auth, Reports, AI)"
+        Write-Host "  aws-deploy-auth - Deploy Cognito User Pool and Google OAuth (via Terraform)"
         Write-Host "  aws-auth-env    - Print Cognito environment variables for .env"
-        Write-Host "  deploy-reports  - Deploy S3 reports bucket and S3 VPC Gateway Endpoint"
+        Write-Host "  deploy-reports  - Deploy S3 reports bucket and Lambda functions (via Terraform)"
         Write-Host "  report-now   - Send on-demand report request to SQS (e.g. .\infra.ps1 report-now 2026-W39)"
         Write-Host "  llm-hello    - Execute the Bedrock LLM hello test script using local AWS credentials"
         Write-Host "  parse        - Parse meeting agenda text using Bedrock LLM (e.g. .\make.cmd parse TEXT=""..."")"
-        Write-Host "  deploy-ai    - Deploy Agenda Parser Lambda & Function URL stack (infra/ai.yml)"
+        Write-Host "  deploy-ai    - Deploy Agenda Parser Lambda & Function URL (via Terraform)"
         Write-Host "  teardown     - Fully destroy all AWS resources (ALB, ECS, ECR, S3, CloudFront) for 0 charges"
         Write-Host "  infra-down   - Alias for teardown"
         Write-Host "  aws-status   - Display status and outputs of AWS stacks"
@@ -134,68 +137,39 @@ switch ($Command.ToLower()) {
         Invoke-AwsCli @("sts", "get-caller-identity")
     }
 
-    "aws-deploy-auth" {
+    "tf-init" {
         Assert-AwsCredentials
-        Write-Host "=== Deploying Cognito & Google OAuth Stack ($AuthStack) ===" -ForegroundColor Cyan
-        Wait-StackIdle -StackName $AuthStack
+        terraform -chdir=infra init
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    }
 
-        $cfUrl = Get-StackOutput -StackName $FrontendStack -OutputKey "SiteUrl"
-        $appUrlsList = @("http://localhost:5173/", "http://localhost:3000/")
-        if ($cfUrl -and $cfUrl -ne "None") {
-            $cfUrlFormatted = if ($cfUrl.EndsWith("/")) { $cfUrl } else { "$cfUrl/" }
-            if ($appUrlsList -notcontains $cfUrlFormatted) {
-                $appUrlsList += $cfUrlFormatted
-            }
-        }
-        $appUrlsParam = $appUrlsList -join ","
+    "tf-plan" {
+        Assert-AwsCredentials
+        terraform -chdir=infra fmt -check
+        terraform -chdir=infra validate
+        terraform -chdir=infra plan `
+            -var="project_name=$ProjectName" `
+            -var="region=$AwsRegion" `
+            -var="parser_model=$ParserModel"
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    }
 
-        $paramOverrides = @(
-            "ProjectName=$ProjectName",
-            "AppUrls=$appUrlsParam"
-        )
-        if ($env:GOOGLE_CLIENT_ID) {
-            $paramOverrides += "GoogleClientId=$($env:GOOGLE_CLIENT_ID)"
-        }
-        if ($env:GOOGLE_CLIENT_SECRET) {
-            $paramOverrides += "GoogleClientSecret=$($env:GOOGLE_CLIENT_SECRET)"
-        }
-
-        $deployArgs = @(
-            "cloudformation", "deploy",
-            "--stack-name", $AuthStack,
-            "--template-file", "infra/auth.yml",
-            "--no-fail-on-empty-changeset",
-            "--tags", "PROJECT_NAME=$ProjectName",
-            "--parameter-overrides"
-        ) + $paramOverrides
-
-        Invoke-AwsCli $deployArgs
-        Wait-StackIdle -StackName $AuthStack
-
-        Write-Host "=== Auth Stack Outputs ===" -ForegroundColor Green
-        $userPoolId = Get-StackOutput -StackName $AuthStack -OutputKey "UserPoolId"
-        $clientId = Get-StackOutput -StackName $AuthStack -OutputKey "UserPoolClientId"
-        $hostedDomain = Get-StackOutput -StackName $AuthStack -OutputKey "HostedDomain"
-        $googleRedirectUri = Get-StackOutput -StackName $AuthStack -OutputKey "GoogleRedirectUri"
-        $googleEnabled = Get-StackOutput -StackName $AuthStack -OutputKey "GoogleEnabled"
-
-        Write-Host "User Pool ID:        $userPoolId" -ForegroundColor Cyan
-        Write-Host "User Pool Client ID: $clientId" -ForegroundColor Cyan
-        Write-Host "Hosted Domain:       $hostedDomain" -ForegroundColor Cyan
-        Write-Host "Google Enabled:      $googleEnabled" -ForegroundColor Cyan
-        Write-Host "Google Redirect URI: $googleRedirectUri" -ForegroundColor Yellow
-        Write-Host ""
-        Write-Host "IMPORTANT: In Google Cloud Console, ensure '$googleRedirectUri' is added to 'Authorized redirect URIs'!" -ForegroundColor Magenta
+    { $_ -in "tf-apply", "aws-deploy-auth", "deploy-reports", "deploy-ai", "aws-deploy-ai" } {
+        Assert-AwsCredentials
+        terraform -chdir=infra apply -auto-approve `
+            -var="project_name=$ProjectName" `
+            -var="region=$AwsRegion" `
+            -var="parser_model=$ParserModel"
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     }
 
     "aws-auth-env" {
-        Assert-AwsCredentials
-        $userPoolId = Get-StackOutput -StackName $AuthStack -OutputKey "UserPoolId"
-        $clientId = Get-StackOutput -StackName $AuthStack -OutputKey "UserPoolClientId"
-        $hostedDomain = Get-StackOutput -StackName $AuthStack -OutputKey "HostedDomain"
+        $userPoolId = (terraform -chdir=infra output -raw user_pool_id 2>$null | Out-String).Trim()
+        $clientId = (terraform -chdir=infra output -raw user_pool_client_id 2>$null | Out-String).Trim()
+        $hostedDomain = (terraform -chdir=infra output -raw hosted_domain 2>$null | Out-String).Trim()
 
         if (-not $userPoolId) {
-            Write-Host "Auth stack ($AuthStack) does not exist yet. Run '.\infra.ps1 aws-deploy-auth' first." -ForegroundColor Red
+            Write-Host "Terraform outputs not available yet. Run '.\infra.ps1 tf-apply' first." -ForegroundColor Red
             return
         }
 
@@ -408,139 +382,15 @@ switch ($Command.ToLower()) {
         Write-Host "==========================================================" -ForegroundColor Green
     }
 
-    "deploy-reports" {
-        Assert-AwsCredentials
-        Write-Host "=== Deploying Reports Infrastructure Stack ($ReportsStack) ===" -ForegroundColor Cyan
-        Wait-StackIdle -StackName $ReportsStack
-
-        $vpc = (Invoke-AwsCli @("ec2", "describe-vpcs", "--filters", "Name=isDefault,Values=true",
-            "--query", "Vpcs[0].VpcId", "--output", "text")).Trim()
-        if (-not $vpc -or $vpc -eq "None") {
-            $vpc = (Invoke-AwsCli @("ec2", "describe-vpcs", "--query", "Vpcs[0].VpcId", "--output", "text")).Trim()
-        }
-        if (-not $vpc -or $vpc -eq "None") {
-            Write-Host "ERROR: No VPC found in $AwsRegion" -ForegroundColor Red
-            exit 1
-        }
-
-        $rtbRaw = Invoke-AwsCli @("ec2", "describe-route-tables", "--filters", "Name=vpc-id,Values=$vpc",
-            "--query", "RouteTables[].RouteTableId", "--output", "text")
-        $routeTables = ($rtbRaw -split '\s+' | Where-Object { $_ }) -join ","
-
-        if (-not $routeTables) {
-            Write-Host "ERROR: No Route Tables found for VPC $vpc in $AwsRegion" -ForegroundColor Red
-            exit 1
-        }
-
-        $subnetsRaw = Invoke-AwsCli @("ec2", "describe-subnets", "--filters", "Name=vpc-id,Values=$vpc",
-            "--query", "Subnets[?MapPublicIpOnLaunch==`true`].SubnetId", "--output", "text")
-        if (-not $subnetsRaw) {
-            $subnetsRaw = Invoke-AwsCli @("ec2", "describe-subnets", "--filters", "Name=vpc-id,Values=$vpc",
-                "--query", "Subnets[].SubnetId", "--output", "text")
-        }
-        $subnets = ($subnetsRaw -split '\s+' | Where-Object { $_ }) -join ","
-
-        $bRepo = Get-StackOutput -StackName $EcrStack -OutputKey "BackendRepositoryUri"
-        $ecsSg = Get-StackOutput -StackName $EcsStack -OutputKey "EcsSecurityGroupId"
-
-        $dbUrl = if ($env:AWS_DATABASE_URL) { $env:AWS_DATABASE_URL } else { "sqlite:////tmp/meetings.db" }
-
-        Write-Host "Target VPC:            $vpc" -ForegroundColor Cyan
-        Write-Host "Target Route Tables:   $routeTables" -ForegroundColor Cyan
-        Write-Host "Target Subnets:        $subnets" -ForegroundColor Cyan
-        Write-Host "Security Group:        $ecsSg" -ForegroundColor Cyan
-        Write-Host "Backend Image URI:     $bRepo`:latest" -ForegroundColor Cyan
-
-        $domainName = if ($env:DOMAIN_NAME) { $env:DOMAIN_NAME } else { "spry.org.ua" }
-        $senderEmail = if ($env:SENDER_EMAIL) { $env:SENDER_EMAIL } else { "reports@$domainName" }
-        $recipientEmail = if ($env:RECIPIENT_EMAIL) { $env:RECIPIENT_EMAIL } else { "pasiura.pn@ucu.edu.ua" }
-
-        $deployArgs = @(
-            "cloudformation", "deploy",
-            "--stack-name", $ReportsStack,
-            "--template-file", "infra/reports.yml",
-            "--capabilities", "CAPABILITY_NAMED_IAM",
-            "--no-fail-on-empty-changeset",
-            "--tags", "PROJECT_NAME=$ProjectName",
-            "--parameter-overrides",
-            "ProjectName=$ProjectName",
-            "VpcId=$vpc",
-            "RouteTableIds=$routeTables",
-            "SubnetIds=$subnets",
-            "SecurityGroupIds=$ecsSg",
-            "ImageUri=$bRepo`:latest",
-            "DatabaseUrl=$dbUrl",
-            "DomainName=$domainName",
-            "SenderEmail=$senderEmail",
-            "RecipientEmail=$recipientEmail"
-        )
-
-        Invoke-AwsCli $deployArgs
-        Wait-StackIdle -StackName $ReportsStack
-
-        Write-Host "=== Reports Stack Outputs ===" -ForegroundColor Green
-        $bucketName = Get-StackOutput -StackName $ReportsStack -OutputKey "ReportsBucketName"
-        $bucketArn = Get-StackOutput -StackName $ReportsStack -OutputKey "ReportsBucketArn"
-        $endpointId = Get-StackOutput -StackName $ReportsStack -OutputKey "S3EndpointId"
-        $functionName = Get-StackOutput -StackName $ReportsStack -OutputKey "ReportBuilderFunctionName"
-        $functionArn = Get-StackOutput -StackName $ReportsStack -OutputKey "ReportBuilderFunctionArn"
-        $queueUrl = Get-StackOutput -StackName $ReportsStack -OutputKey "ReportRequestsQueueUrl"
-        $queueArn = Get-StackOutput -StackName $ReportsStack -OutputKey "ReportRequestsQueueArn"
-        $scheduleArn = Get-StackOutput -StackName $ReportsStack -OutputKey "WeeklyReportScheduleArn"
-
-        $mailerName = Get-StackOutput -StackName $ReportsStack -OutputKey "ReportMailerFunctionName"
-        $mailerArn = Get-StackOutput -StackName $ReportsStack -OutputKey "ReportMailerFunctionArn"
-
-        $domainIdentity = Get-StackOutput -StackName $ReportsStack -OutputKey "DomainIdentityName"
-        $dkimTokens = Get-StackOutput -StackName $ReportsStack -OutputKey "DkimTokens"
-        $token1Name = Get-StackOutput -StackName $ReportsStack -OutputKey "DkimDNSTokenName1"
-        $token1Val = Get-StackOutput -StackName $ReportsStack -OutputKey "DkimDNSTokenValue1"
-        $token2Name = Get-StackOutput -StackName $ReportsStack -OutputKey "DkimDNSTokenName2"
-        $token2Val = Get-StackOutput -StackName $ReportsStack -OutputKey "DkimDNSTokenValue2"
-        $token3Name = Get-StackOutput -StackName $ReportsStack -OutputKey "DkimDNSTokenName3"
-        $token3Val = Get-StackOutput -StackName $ReportsStack -OutputKey "DkimDNSTokenValue3"
-
-        foreach ($fn in @($functionName, $mailerName)) {
-            if ($fn -and $fn -ne "None") {
-                try {
-                    Write-Host "Syncing Lambda code for $fn to $bRepo`:latest..." -ForegroundColor Cyan
-                    $null = Invoke-AwsCli @("lambda", "update-function-code", "--function-name", $fn, "--image-uri", "$bRepo`:latest")
-                    $null = Invoke-AwsCli @("lambda", "wait", "function-updated", "--function-name", $fn)
-                } catch {}
-            }
-        }
-
-        Write-Host "Reports S3 Bucket:       $bucketName" -ForegroundColor Cyan
-        Write-Host "Reports Bucket ARN:      $bucketArn" -ForegroundColor Cyan
-        Write-Host "S3 VPC Endpoint ID:      $endpointId" -ForegroundColor Cyan
-        Write-Host "Report Requests Queue:   $queueUrl" -ForegroundColor Cyan
-        Write-Host "Queue ARN:               $queueArn" -ForegroundColor Cyan
-        Write-Host "Report Builder Function: $functionName" -ForegroundColor Cyan
-        Write-Host "Builder Function ARN:    $functionArn" -ForegroundColor Cyan
-        Write-Host "Report Mailer Function:  $mailerName" -ForegroundColor Cyan
-        Write-Host "Mailer Function ARN:     $mailerArn" -ForegroundColor Cyan
-        Write-Host "Weekly Schedule ARN:     $scheduleArn" -ForegroundColor Cyan
-        Write-Host "SES Domain Identity:     $domainIdentity" -ForegroundColor Cyan
-        Write-Host "DKIM Tokens:             $dkimTokens" -ForegroundColor Cyan
-        Write-Host "==========================================================" -ForegroundColor Yellow
-        Write-Host "DKIM CNAME Records for Domain Verification ($domainName):" -ForegroundColor Yellow
-        Write-Host "  1. Name:  $token1Name" -ForegroundColor Yellow
-        Write-Host "     Value: $token1Val" -ForegroundColor Yellow
-        Write-Host "  2. Name:  $token2Name" -ForegroundColor Yellow
-        Write-Host "     Value: $token2Val" -ForegroundColor Yellow
-        Write-Host "  3. Name:  $token3Name" -ForegroundColor Yellow
-        Write-Host "     Value: $token3Val" -ForegroundColor Yellow
-        Write-Host "==========================================================" -ForegroundColor Yellow
-        Write-Host "Reports infrastructure deployed successfully!" -ForegroundColor Green
-        Write-Host "==========================================================" -ForegroundColor Green
-    }
-
     "report-now" {
         Assert-AwsCredentials
         $targetWeek = if ($Arg1) { $Arg1 } elseif ($env:WEEK) { $env:WEEK } else { "2026-W39" }
-        $queueUrl = Get-StackOutput -StackName $ReportsStack -OutputKey "ReportRequestsQueueUrl"
+        $queueUrl = (terraform -chdir=infra output -raw report_requests_queue_url 2>$null | Out-String).Trim()
+        if (-not $queueUrl) {
+            $queueUrl = Get-StackOutput -StackName $ReportsStack -OutputKey "ReportRequestsQueueUrl"
+        }
         if (-not $queueUrl -or $queueUrl -eq "None") {
-            Write-Host "ERROR: ReportRequestsQueueUrl not found in stack $ReportsStack. Run 'deploy-reports' first." -ForegroundColor Red
+            Write-Host "ERROR: report_requests_queue_url not found. Run '.\make.cmd tf-apply' first." -ForegroundColor Red
             exit 1
         }
         $payload = '{\"week\": \"' + $targetWeek + '\", \"source\": \"on-demand\"}'
@@ -567,73 +417,6 @@ switch ($Command.ToLower()) {
         }
         python backend/app/ai/agenda.py
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-    }
-
-    { $_ -in "deploy-ai", "aws-deploy-ai" } {
-        Assert-AwsCredentials
-        Write-Host "=== Deploying AI Agenda Parser Stack ($AiStack) ===" -ForegroundColor Cyan
-        Wait-StackIdle -StackName $AiStack
-
-        $bRepo = Get-StackOutput -StackName $EcrStack -OutputKey "BackendRepositoryUri"
-        if (-not $bRepo -or $bRepo -eq "None") {
-            Write-Host "ERROR: Backend ECR repository not found. Run 'aws-init' and 'build-push' first." -ForegroundColor Red
-            exit 1
-        }
-
-        $poolId = Get-StackOutput -StackName $AuthStack -OutputKey "UserPoolId"
-        if (-not $poolId -or $poolId -eq "None") {
-            $poolId = if ($env:COGNITO_USER_POOL_ID) { $env:COGNITO_USER_POOL_ID } else { $env:VITE_COGNITO_USER_POOL_ID }
-        }
-        $clientId = Get-StackOutput -StackName $AuthStack -OutputKey "UserPoolClientId"
-        if (-not $clientId -or $clientId -eq "None") {
-            $clientId = if ($env:COGNITO_CLIENT_ID) { $env:COGNITO_CLIENT_ID } else { $env:VITE_COGNITO_CLIENT_ID }
-        }
-
-        $siteUrl = Get-StackOutput -StackName $FrontendStack -OutputKey "SiteUrl"
-        $corsList = @("http://localhost:5173", "http://localhost:3000")
-        if ($siteUrl -and $siteUrl -ne "None") {
-            $siteClean = $siteUrl.TrimEnd("/")
-            if ($corsList -notcontains $siteClean) {
-                $corsList += $siteClean
-            }
-        }
-        $corsOrigins = $corsList -join ","
-
-        $deployArgs = @(
-            "cloudformation", "deploy",
-            "--stack-name", $AiStack,
-            "--template-file", "infra/ai.yml",
-            "--capabilities", "CAPABILITY_NAMED_IAM",
-            "--no-fail-on-empty-changeset",
-            "--tags", "PROJECT_NAME=$ProjectName",
-            "--parameter-overrides",
-            "ProjectName=$ProjectName",
-            "ImageUri=$bRepo`:latest",
-            "CognitoUserPoolId=$poolId",
-            "CognitoClientId=$clientId",
-            "ParserModel=$ParserModel",
-            "CorsOrigins=$corsOrigins"
-        )
-
-        Invoke-AwsCli $deployArgs
-        Wait-StackIdle -StackName $AiStack
-
-        $fnName = Get-StackOutput -StackName $AiStack -OutputKey "AgendaParserFunctionName"
-        $fnArn = Get-StackOutput -StackName $AiStack -OutputKey "AgendaParserFunctionArn"
-        $fnUrl = Get-StackOutput -StackName $AiStack -OutputKey "AgendaParserFunctionUrl"
-
-        if ($fnName -and $fnName -ne "None") {
-            try {
-                Write-Host "Syncing Lambda code for $fnName to $bRepo`:latest..." -ForegroundColor Cyan
-                $null = Invoke-AwsCli @("lambda", "update-function-code", "--function-name", $fnName, "--image-uri", "$bRepo`:latest")
-                $null = Invoke-AwsCli @("lambda", "wait", "function-updated", "--function-name", $fnName)
-            } catch {}
-        }
-
-        Write-Host "=== AI Stack Outputs ===" -ForegroundColor Green
-        Write-Host "Agenda Parser Function Name: $fnName" -ForegroundColor Cyan
-        Write-Host "Agenda Parser Function ARN:  $fnArn" -ForegroundColor Cyan
-        Write-Host "Agenda Parser Function URL:  $fnUrl" -ForegroundColor Yellow
     }
 
     { $_ -in "teardown", "infra-down" } {

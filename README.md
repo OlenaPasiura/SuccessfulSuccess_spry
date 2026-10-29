@@ -30,13 +30,14 @@ The backend applies migrations on start.
 
 Every page except the login page, and every `/api/v1` endpoint, needs a
 signed-in user, and each user sees only their own meetings. Sign-in is an AWS
-Cognito user pool (`infra/auth.yml`): email + password, and Google when it is
+Cognito user pool (`infra/auth.tf`): email + password, and Google when it is
 configured. Even for local development the pool lives in AWS (it is free at
 this scale):
 
 ```bash
-make aws-deploy-auth   # create/update the user pool; allows http://localhost:$FRONTEND_PORT/
-make aws-auth-env      # prints COGNITO_* lines: paste them into .env
+make tf-init           # initialize Terraform in infra/ (HCP Terraform: SuccessfulSuccess_spry-dev)
+make infra-plan        # format check, validate, and run remote Terraform plan
+make aws-auth-env      # prints COGNITO_* lines from terraform output -raw: paste them into .env
 docker compose up -d   # restart so the API and the frontend pick them up
 ```
 
@@ -156,13 +157,31 @@ make aws-whoami
 
 | Command | Alias | Description |
 |---------|-------|-------------|
-| `make aws-init` | `make infra-up` | **Create base infrastructure:** ECR repositories (backend & frontend), S3 Standard bucket & CloudFront distribution, ECS Cluster, IAM roles (Task Execution & Task Role), Security Groups, and ALB + single Target Group. |
+| `make tf-init` | — | **Initialize Terraform:** Initializes provider plugins (`hashicorp/aws ~> 6.0`) and the remote HCP Terraform backend (`ooad-OlenaPasiura` / `SuccessfulSuccess_spry-dev`) in `infra/`. |
+| `make infra-plan` | `make tf-plan` | **Preview Infrastructure Plan:** Runs `terraform fmt -check`, `terraform validate`, and a remote `terraform plan` in HCP Terraform Workspace `SuccessfulSuccess_spry-dev` across `infra/auth.tf`, `infra/reports.tf`, `infra/ai.tf`, and `infra/outputs.tf`. |
+| `make aws-auth-env` | — | **Export Auth Outputs:** Reads Cognito identifiers via `terraform -chdir=infra output -raw <name>` and prints `.env` variables. |
+| `make report-now` | — | **Trigger On-Demand Weekly Report:** Reads `report_requests_queue_url` via `terraform -chdir=infra output -raw` and sends an SQS message. |
 | `make build-push` | — | **Build & push Docker images:** Builds images for AWS architecture (`x86_64` / `linux/amd64`), logs into ECR, tags images as `:latest`, and pushes to AWS ECR. |
-| `make deploy` | — | **Deploy services & static files:** Deploys/updates the ECS Fargate service (0.25 vCPU / 0.5 GB RAM) and builds the frontend static export pointing to the ALB API URL, uploads to S3, and invalidates the CloudFront cache (`/*`). |
-| `make teardown` | `make infra-down` | **Cost Control & Full Cleanup:** Completely destroys and removes all created AWS resources (ALB, ECS Service, ECS Cluster, ECR repositories, S3 bucket, CloudFront distribution, CloudWatch log groups) to avoid any unexpected charges. |
-| `make aws-status` | — | Display stack status and deployment outputs. |
-| `make aws-logs` | — | Tail CloudWatch logs from the backend ECS container. |
-| `make aws-url` | — | Print deployed CloudFront and ALB URLs. |
+| `make deploy` | — | **Deploy application updates:** Updates Lambda functions with the latest ECR image and reads infrastructure outputs via `terraform -chdir=infra output -raw`. |
+| `make aws-logs` | — | Tail CloudWatch logs from the backend container. |
+| `make aws-url` | — | Print deployed Cognito, Reports, and AI Agenda Parser endpoints from Terraform outputs. |
+
+### Terraform & HCP Terraform Infrastructure (`infra/*.tf`)
+
+All cloud infrastructure for Authentication, Weekly Reports, and AI Agenda Parsing was migrated from legacy CloudFormation YAML templates to **Terraform (`>= 1.10`)** with the **AWS Provider (`~> 6.0`)** in `infra/`, managed via **HCP Terraform**:
+
+- **HCP Terraform Organization:** `ooad-OlenaPasiura`
+- **HCP Terraform Workspace:** `SuccessfulSuccess_spry-dev` (Remote execution mode)
+- **Dynamic AWS OIDC Authentication:** Configured via workspace variables `TFC_AWS_PROVIDER_AUTH = true` and `TFC_AWS_RUN_ROLE_ARN = arn:aws:iam::565905128959:role/tfc-workload-identity-role`
+- **Architecture Decision Record:** See [`docs/adr/0007-terraform.md`](docs/adr/0007-terraform.md)
+
+#### Files in `infra/`
+- `infra/versions.tf` — Terraform `>= 1.10`, `hashicorp/aws ~> 6.0`, HCP Terraform `cloud` block (`SuccessfulSuccess_spry-dev`), and provider `default_tags` (`PROJECT_NAME` and `ManagedBy = "terraform"`).
+- `infra/variables.tf` — Typed input variables (`project_name`, `region`, `google_client_secret` marked `sensitive = true`, VPC/subnet IDs, SES domain settings, and `parser_model = "us.anthropic.claude-sonnet-4-6"`).
+- `infra/auth.tf` — Cognito User Pool (`successfulsuccess-users`), User Pool Domain (`successfulsuccess-565905128959`), Google OAuth Identity Provider, and public Web Client (`successfulsuccess-web`).
+- `infra/reports.tf` — S3 bucket for weekly reports (`successfulsuccess-reports-565905128959`), S3 VPC Gateway Endpoint, SQS queue + DLQ, Report Builder & Report Mailer Lambda functions, EventBridge Scheduler cron (`cron(0 7 ? * MON *)`), and SES domain identity (`spry.org.ua`). Resolves S3-to-Lambda circular dependencies via separate `aws_s3_bucket.reports`, `aws_lambda_permission.report_mailer_s3`, and `aws_s3_bucket_notification.reports` resources.
+- `infra/ai.tf` — Sidecar `successfulsuccess-agenda-parser` Lambda function outside the VPC, CloudWatch log group, IAM role with `bedrock:InvokeModel`, and Lambda Function URL with CORS.
+- `infra/outputs.tf` — Outputs consumed by `Makefile` via `terraform -chdir=infra output -raw <output_name>`.
 
 ### Windows Support
 
@@ -271,7 +290,8 @@ sent, so every client shows the same time as the day it was listed under.
 ```
 backend/    FastAPI app (api → services → repositories → models), Alembic, tests
 frontend/   Next.js app, shadcn/ui primitives in components/ui
-infra/      CloudFormation templates behind the aws-* targets
+infra/      Terraform HCL configuration (auth.tf, reports.tf, ai.tf, outputs.tf)
+docs/adr/   Architecture Decision Records (including 0007-terraform.md)
 docker-compose.yml
 ```
 
