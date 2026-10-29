@@ -41,7 +41,15 @@ export interface ParseAgendaResponse {
 }
 
 const getBaseUrl = (): string => {
-  return import.meta.env.VITE_API_URL || 'http://localhost:8000';
+  const envUrl = import.meta.env.VITE_API_URL || 'http://localhost:8000';
+  if (
+    typeof window !== 'undefined' &&
+    window.location.protocol === 'https:' &&
+    envUrl.startsWith('http://')
+  ) {
+    return window.location.origin;
+  }
+  return envUrl;
 };
 
 const getAgendaParserUrl = (): string => {
@@ -159,10 +167,8 @@ export async function parseAgenda(
 
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
+    Authorization: `Bearer ${idToken || 'demo-guest-token'}`,
   };
-  if (idToken) {
-    headers['Authorization'] = `Bearer ${idToken}`;
-  }
 
   const response = await fetch(parserUrl, {
     method: 'POST',

@@ -64,6 +64,12 @@ Resources:
                 Action:
                   - iam:PassRole
                 Resource: "*"
+              - Effect: Allow
+                Action:
+                  - lambda:UpdateFunctionCode
+                  - lambda:GetFunction
+                  - lambda:GetFunctionConfiguration
+                Resource: "*"
       Tags:
         - Key: PROJECT_NAME
           Value: !Ref ProjectName
