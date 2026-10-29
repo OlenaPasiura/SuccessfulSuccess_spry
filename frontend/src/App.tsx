@@ -183,6 +183,7 @@ export const App: React.FC = () => {
               error={error}
               onRetry={loadMeetings}
               onEdit={(m) => setEditingMeeting(m)}
+              token={auth.user?.id_token || auth.user?.access_token}
             />
           </div>
         </div>

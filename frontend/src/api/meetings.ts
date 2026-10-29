@@ -213,3 +213,179 @@ export async function parseAgenda(
 
   return response.json();
 }
+
+export function getIsoWeekString(dateObj: Date = new Date()): string {
+  const d = new Date(Date.UTC(dateObj.getFullYear(), dateObj.getMonth(), dateObj.getDate()));
+  const dayNum = d.getUTCDay() || 7;
+  d.setUTCDate(d.getUTCDate() + 4 - dayNum);
+  const yearStart = new Date(Date.UTC(d.getUTCFullYear(), 0, 1));
+  const weekNo = Math.ceil(((d.getTime() - yearStart.getTime()) / 86400000 + 1) / 7);
+  return `${d.getUTCFullYear()}-W${String(weekNo).padStart(2, '0')}`;
+}
+
+function getIsoWeekBoundsUtc(weekStr: string): {
+  start: Date;
+  end: Date;
+  prevStart: Date;
+  prevEnd: Date;
+  prevLabel: string;
+} {
+  const match = /^(\d{4})-[Ww](\d{1,2})$/.exec(weekStr.trim());
+  const year = match ? parseInt(match[1], 10) : new Date().getUTCFullYear();
+  const week = match ? parseInt(match[2], 10) : 1;
+  const jan4 = new Date(Date.UTC(year, 0, 4));
+  const jan4Day = jan4.getUTCDay() || 7;
+  const week1Monday = new Date(jan4.getTime() - (jan4Day - 1) * 86400000);
+  const start = new Date(week1Monday.getTime() + (week - 1) * 7 * 86400000);
+  const end = new Date(start.getTime() + 7 * 86400000);
+  const prevStart = new Date(start.getTime() - 7 * 86400000);
+  const prevEnd = start;
+  const prevLabel = getIsoWeekString(prevStart);
+  return { start, end, prevStart, prevEnd, prevLabel };
+}
+
+function buildFallbackReportLines(week: string, meetings: Meeting[]): string[][] {
+  const { start, end, prevStart, prevEnd, prevLabel } = getIsoWeekBoundsUtc(week);
+  const curr = meetings.filter((m) => {
+    const t = new Date(m.starts_at).getTime();
+    return t >= start.getTime() && t < end.getTime();
+  });
+  const prev = meetings.filter((m) => {
+    const t = new Date(m.starts_at).getTime();
+    return t >= prevStart.getTime() && t < prevEnd.getTime();
+  });
+  const durHours = (m: Meeting) =>
+    Math.max(0, (new Date(m.ends_at).getTime() - new Date(m.starts_at).getTime()) / 3600000);
+  const currHours = curr.reduce((s, m) => s + durHours(m), 0);
+  const prevHours = prev.reduce((s, m) => s + durHours(m), 0);
+  const countDiff = curr.length - prev.length;
+  const hoursDiff = currHours - prevHours;
+  const top5 = [...curr].sort((a, b) => durHours(b) - durHours(a)).slice(0, 5);
+  const fmtDate = (d: Date) => d.toISOString().slice(0, 10);
+  const sunday = new Date(end.getTime() - 86400000);
+  const prevSunday = new Date(prevEnd.getTime() - 86400000);
+
+  const rows: string[][] = [
+    ['Weekly Meeting Report', week],
+    ['Period', `${fmtDate(start)} to ${fmtDate(sunday)}`],
+    ['Previous Week', `${prevLabel} (${fmtDate(prevStart)} to ${fmtDate(prevSunday)})`],
+    [],
+    ['Metric', `Current Week (${week})`, `Previous Week (${prevLabel})`, 'Change'],
+    [
+      'Meeting Count',
+      String(curr.length),
+      String(prev.length),
+      countDiff > 0 ? `+${countDiff}` : String(countDiff),
+    ],
+    [
+      'Total Duration (hours)',
+      currHours.toFixed(2),
+      prevHours.toFixed(2),
+      hoursDiff > 0 ? `+${hoursDiff.toFixed(2)}` : hoursDiff.toFixed(2),
+    ],
+    [],
+    ['Top 5 Longest Meetings'],
+    ['Rank', 'Title', 'Start Time', 'Duration (hours)', 'Participant Count'],
+  ];
+  top5.forEach((m, i) => {
+    rows.push([
+      String(i + 1),
+      m.title,
+      m.starts_at,
+      durHours(m).toFixed(2),
+      String(m.attendee_count),
+    ]);
+  });
+  return rows;
+}
+
+function buildPdfStringFromRows(rows: string[][]): string {
+  const esc = (s: string) =>
+    s
+      .replace(/[^\x20-\x7E]/g, '?')
+      .replace(/\\/g, '\\\\')
+      .replace(/\(/g, '\\(')
+      .replace(/\)/g, '\\)');
+  const cmds = ['BT', '/F1 16 Tf', '50 760 Td'];
+  rows.forEach((row, idx) => {
+    if (idx === 1) {
+      cmds.push('/F1 10 Tf', '0 -22 Td');
+    } else if (idx > 1) {
+      cmds.push('0 -16 Td');
+    }
+    const line = row.length === 0 ? '' : row.join(' | ');
+    cmds.push(`(${esc(line)}) Tj`);
+  });
+  cmds.push('ET');
+  const stream = cmds.join('\n');
+
+  const objs = [
+    '1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n',
+    '2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n',
+    '3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>\nendobj\n',
+    '4 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n',
+    `5 0 obj\n<< /Length ${stream.length} >>\nstream\n${stream}\nendstream\nendobj\n`,
+  ];
+
+  let out = '%PDF-1.4\n';
+  const offsets: number[] = [];
+  for (const o of objs) {
+    offsets.push(out.length);
+    out += o;
+  }
+  const xref = out.length;
+  out += `xref\n0 ${objs.length + 1}\n0000000000 65535 f \n`;
+  for (const off of offsets) {
+    out += `${String(off).padStart(10, '0')} 00000 n \n`;
+  }
+  out += `trailer\n<< /Size ${objs.length + 1} /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF\n`;
+  return out;
+}
+
+export async function downloadWeeklyReport(
+  week: string,
+  format: 'pdf' | 'csv',
+  meetings: Meeting[],
+  token?: string
+): Promise<void> {
+  const baseUrl = getBaseUrl();
+  const headers: Record<string, string> = {};
+  if (token) {
+    headers['Authorization'] = `Bearer ${token}`;
+  }
+
+  let blob: Blob | null = null;
+  try {
+    const res = await fetch(
+      `${baseUrl}/api/reports/weekly?week=${encodeURIComponent(week)}&format=${format}`,
+      { headers }
+    );
+    if (res.ok) {
+      blob = await res.blob();
+    }
+  } catch {
+    // Fallback to client-side report generation if endpoint is unreachable
+  }
+
+  if (!blob) {
+    const rows = buildFallbackReportLines(week, meetings);
+    if (format === 'csv') {
+      const csvContent = rows
+        .map((r) => r.map((cell) => `"${cell.replace(/"/g, '""')}"`).join(','))
+        .join('\n');
+      blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    } else {
+      const pdfContent = buildPdfStringFromRows(rows);
+      blob = new Blob([pdfContent], { type: 'application/pdf' });
+    }
+  }
+
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = `weekly-report-${week}.${format}`;
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+  URL.revokeObjectURL(url);
+}

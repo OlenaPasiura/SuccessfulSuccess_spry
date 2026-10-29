@@ -2,13 +2,14 @@ import os
 from datetime import UTC, date, datetime
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, status
-from fastapi.responses import JSONResponse
+from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app.ai.agenda import DEFAULT_MODEL, PROMPT_VERSION, AgendaParseError, parse_agenda
 from app.db import get_db
+from app.reports.weekly import build_weekly_report, build_weekly_report_pdf
 from app.schemas.meeting import MeetingCreate, MeetingResponse
 from app.services import meetings as meeting_service
 
@@ -81,3 +82,31 @@ def parse_meeting_agenda(payload: AgendaParseRequest) -> dict[str, Any]:
         "model": model,
         "prompt_version": PROMPT_VERSION,
     }
+
+
+@router.get("/api/reports/weekly", status_code=status.HTTP_200_OK)
+def download_weekly_report(
+    week: str | None = Query(default=None, description="ISO week e.g. 2026-W44"),
+    report_format: str = Query(default="pdf", alias="format", description="pdf or csv"),
+    db: Session = Depends(get_db),
+) -> Response:
+    if not week:
+        iso_year, iso_week, _ = datetime.now(UTC).date().isocalendar()
+        week = f"{iso_year}-W{iso_week:02d}"
+
+    try:
+        if report_format.lower() == "csv":
+            csv_bytes = build_weekly_report(week, db=db)
+            return Response(
+                content=csv_bytes,
+                media_type="text/csv; charset=utf-8",
+                headers={"Content-Disposition": f'attachment; filename="weekly-report-{week}.csv"'},
+            )
+        pdf_bytes = build_weekly_report_pdf(week, db=db)
+        return Response(
+            content=pdf_bytes,
+            media_type="application/pdf",
+            headers={"Content-Disposition": f'attachment; filename="weekly-report-{week}.pdf"'},
+        )
+    except ValueError as err:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(err)) from err

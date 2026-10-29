@@ -195,6 +195,64 @@ def build_weekly_report(week: str, db: Session | None = None) -> bytes:
         return _generate_weekly_report(week, session)
 
 
+def _escape_pdf_text(text: str) -> str:
+    ascii_text = text.encode("ascii", errors="replace").decode("ascii")
+    return ascii_text.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
+
+
+def _build_pdf_from_lines(lines: list[str]) -> bytes:
+    content_cmds = ["BT", "/F1 16 Tf", "50 760 Td"]
+    for idx, line in enumerate(lines):
+        if idx == 1:
+            content_cmds.append("/F1 10 Tf")
+            content_cmds.append("0 -22 Td")
+        elif idx > 1:
+            content_cmds.append("0 -16 Td")
+        content_cmds.append(f"({_escape_pdf_text(line)}) Tj")
+    content_cmds.append("ET")
+    stream_bytes = "\n".join(content_cmds).encode("ascii")
+
+    objects = [
+        b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n",
+        b"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n",
+        (
+            b"3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] "
+            b"/Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>\nendobj\n"
+        ),
+        b"4 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n",
+        f"5 0 obj\n<< /Length {len(stream_bytes)} >>\nstream\n".encode("ascii")
+        + stream_bytes
+        + b"\nendstream\nendobj\n",
+    ]
+
+    pdf = bytearray(b"%PDF-1.4\n")
+    offsets: list[int] = []
+    for obj in objects:
+        offsets.append(len(pdf))
+        pdf.extend(obj)
+
+    xref_pos = len(pdf)
+    pdf.extend(f"xref\n0 {len(objects) + 1}\n0000000000 65535 f \n".encode("ascii"))
+    for off in offsets:
+        pdf.extend(f"{off:010d} 00000 n \n".encode("ascii"))
+    trailer = f"trailer\n<< /Size {len(objects) + 1} /Root 1 0 R >>\nstartxref\n{xref_pos}\n%%EOF\n"
+    pdf.extend(trailer.encode("ascii"))
+    return bytes(pdf)
+
+
+def build_weekly_report_pdf(week: str, db: Session | None = None) -> bytes:
+    """Generate weekly meeting report as a valid PDF document."""
+    csv_text = build_weekly_report(week, db=db).decode("utf-8")
+    reader = csv.reader(io.StringIO(csv_text))
+    lines: list[str] = []
+    for row in reader:
+        if not row:
+            lines.append("")
+        else:
+            lines.append(" | ".join(row))
+    return _build_pdf_from_lines(lines)
+
+
 if __name__ == "__main__":
     week_arg = sys.argv[1] if len(sys.argv) > 1 else "2026-W40"
     report_bytes = build_weekly_report(week_arg)

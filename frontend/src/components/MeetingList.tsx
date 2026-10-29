@@ -1,8 +1,17 @@
-import React from 'react';
-import { Meeting } from '@/api/meetings';
+import React, { useState } from 'react';
+import { downloadWeeklyReport, getIsoWeekString, Meeting } from '@/api/meetings';
 import { Card, CardHeader, CardTitle, CardContent } from './ui/card';
 import { Button } from './ui/button';
-import { Calendar, Clock, Users, AlertCircle, RefreshCw, Loader2, Pencil } from 'lucide-react';
+import {
+  Calendar,
+  Clock,
+  Users,
+  AlertCircle,
+  RefreshCw,
+  Loader2,
+  Pencil,
+  FileDown,
+} from 'lucide-react';
 
 interface MeetingListProps {
   meetings: Meeting[];
@@ -10,6 +19,7 @@ interface MeetingListProps {
   error: string | null;
   onRetry: () => void;
   onEdit?: (meeting: Meeting) => void;
+  token?: string;
 }
 
 function formatMeetingDateTime(isoString: string): string {
@@ -34,24 +44,78 @@ export const MeetingList: React.FC<MeetingListProps> = ({
   error,
   onRetry,
   onEdit,
+  token,
 }) => {
+  const [selectedWeek, setSelectedWeek] = useState<string>(() => getIsoWeekString());
+  const [isDownloadingReport, setIsDownloadingReport] = useState(false);
+
+  const EffectiveWeek =
+    selectedWeek ||
+    (meetings.length > 0 ? getIsoWeekString(new Date(meetings[0].starts_at)) : getIsoWeekString());
+
+  const handleDownloadReport = async (format: 'pdf' | 'csv') => {
+    setIsDownloadingReport(true);
+    try {
+      const targetWeek =
+        meetings.length > 0 && selectedWeek === getIsoWeekString()
+          ? getIsoWeekString(new Date(meetings[meetings.length - 1].starts_at))
+          : EffectiveWeek;
+      await downloadWeeklyReport(targetWeek, format, meetings, token);
+    } finally {
+      setIsDownloadingReport(false);
+    }
+  };
+
   return (
     <div className="space-y-4">
-      <div className="flex items-center justify-between">
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
         <div>
           <h2 className="text-xl font-bold tracking-tight text-gray-900">Scheduled Meetings</h2>
           <p className="text-sm text-gray-500">View all current meetings and participants</p>
         </div>
-        <Button
-          variant="outline"
-          size="sm"
-          onClick={onRetry}
-          disabled={isLoading}
-          className="flex items-center gap-1.5 text-gray-600 hover:text-gray-900"
-        >
-          <RefreshCw className={`h-3.5 w-3.5 ${isLoading ? 'animate-spin' : ''}`} />
-          Refresh
-        </Button>
+        <div className="flex flex-wrap items-center gap-2">
+          <input
+            type="week"
+            value={selectedWeek}
+            onChange={(e) => setSelectedWeek(e.target.value)}
+            aria-label="Select ISO week for report"
+            className="h-8 rounded-md border border-gray-300 bg-white px-2.5 text-xs text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-600"
+          />
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => handleDownloadReport('pdf')}
+            disabled={isDownloadingReport}
+            className="flex items-center gap-1.5 border-indigo-200 bg-indigo-50/70 text-indigo-700 hover:bg-indigo-100 hover:text-indigo-900 font-medium"
+          >
+            {isDownloadingReport ? (
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            ) : (
+              <FileDown className="h-3.5 w-3.5" />
+            )}
+            Weekly Report (PDF)
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => handleDownloadReport('csv')}
+            disabled={isDownloadingReport}
+            className="flex items-center gap-1 text-gray-600 hover:text-gray-900"
+          >
+            <FileDown className="h-3.5 w-3.5" />
+            CSV
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={onRetry}
+            disabled={isLoading}
+            className="flex items-center gap-1.5 text-gray-600 hover:text-gray-900"
+          >
+            <RefreshCw className={`h-3.5 w-3.5 ${isLoading ? 'animate-spin' : ''}`} />
+            Refresh
+          </Button>
+        </div>
       </div>
 
       {isLoading && meetings.length === 0 && (
