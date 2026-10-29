@@ -50,6 +50,7 @@ jobs:
       - name: Run Backend Tests
         env:
           PYTHONPATH: backend
+          DATABASE_URL: sqlite:///:memory:
         run: pytest backend/tests/
 
   deploy:
